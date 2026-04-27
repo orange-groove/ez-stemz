@@ -1,0 +1,15 @@
+build/
+build-*/
+.cache/
+.DS_Store
+*.user
+*.log
+
+# Local config
+.env
+
+# IDE
+.vscode/
+.idea/
+JuceLibraryCode/
+Builds/

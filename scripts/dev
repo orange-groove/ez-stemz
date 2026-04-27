@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Fast incremental dev build: Ninja + ccache + Debug.
+# Usage:
+#   scripts/dev          # configure (if needed) + build
+#   scripts/dev run      # build then launch the app
+#   scripts/dev release  # one-off Release build into build-release/
+#   scripts/dev clean    # nuke the dev build dir
+#   scripts/dev fresh    # wipe + reconfigure + build
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+BUILD_DIR=${BUILD_DIR:-build}
+APP_PATH="${BUILD_DIR}/ezstemz_artefacts/Debug/EZStemz.app"
+
+configure() {
+    cmake -B "${BUILD_DIR}" -G Ninja -DCMAKE_BUILD_TYPE=Debug "$@"
+}
+
+build() {
+    if [[ ! -f "${BUILD_DIR}/build.ninja" ]]; then
+        configure
+    fi
+    cmake --build "${BUILD_DIR}"
+}
+
+case "${1:-build}" in
+    build|"")
+        build
+        ;;
+    run)
+        build
+        open "${APP_PATH}"
+        ;;
+    release)
+        cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release
+        cmake --build build-release
+        ;;
+    clean)
+        chmod -R u+w "${BUILD_DIR}" 2>/dev/null || true
+        rm -rf "${BUILD_DIR}"
+        ;;
+    fresh)
+        chmod -R u+w "${BUILD_DIR}" 2>/dev/null || true
+        rm -rf "${BUILD_DIR}"
+        configure
+        cmake --build "${BUILD_DIR}"
+        ;;
+    *)
+        echo "unknown command: $1" >&2
+        echo "usage: scripts/dev [build|run|release|clean|fresh]" >&2
+        exit 2
+        ;;
+esac
