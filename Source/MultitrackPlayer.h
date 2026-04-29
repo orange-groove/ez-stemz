@@ -3,7 +3,12 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_formats/juce_audio_formats.h>
+#include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_utils/juce_audio_utils.h>
+
+#include <atomic>
+#include <memory>
+#include <vector>
 
 namespace signalsmith { namespace stretch {
     template <typename Sample, class RandomEngine> class SignalsmithStretch;
@@ -77,6 +82,13 @@ public:
     void  setMasterGain  (float linearGain);
     float getMasterGain() const noexcept;
 
+    /** Peak level (linear, 0..1+) after track fader for the last processed
+        audio block. For UI meters only; read from the message thread. */
+    float getTrackPostFaderMeter (int trackIndex) const noexcept;
+
+    /** Peak level (linear) of the master output for the last processed block. */
+    float getMasterOutputMeter() const noexcept;
+
     /** Playback rate as a multiplier (1.0 = normal speed). When pitch
         preservation is on (the default), a phase-vocoder-style time
         stretcher is used; otherwise it falls back to vinyl-style
@@ -89,6 +101,24 @@ public:
         (vinyl mode) but uses zero added latency / CPU. */
     void  setPreservePitch (bool shouldPreservePitch);
     bool  getPreservePitch() const noexcept;
+
+    double getHostSampleRate() const noexcept { return deviceSampleRate; }
+    int    getHostBlockSize() const noexcept { return deviceBlockSize; }
+
+    // ---------- inserts (FX) - processed on the audio thread; UI must use
+    //       the add/remove accessors below (they take tracksLock). ----------
+
+    juce::AudioPluginFormatManager& getPluginFormatManager() noexcept;
+
+    void addTrackInsert (int trackIndex, std::unique_ptr<juce::AudioProcessor> proc);
+    void removeTrackInsert (int trackIndex, int insertIndex);
+    int  getNumTrackInserts (int trackIndex) const;
+    juce::AudioProcessor* getTrackInsert (int trackIndex, int insertIndex) const noexcept;
+
+    void addMasterInsert (std::unique_ptr<juce::AudioProcessor> proc);
+    void removeMasterInsert (int insertIndex);
+    int  getNumMasterInserts() const;
+    juce::AudioProcessor* getMasterInsert (int insertIndex) const noexcept;
 
     // ---------- AudioSource ----------
     void prepareToPlay (int samplesPerBlockExpected, double sampleRate) override;
@@ -109,6 +139,8 @@ private:
         std::atomic<bool>  muted { false };
         std::atomic<bool>  soloed{ false };
         std::atomic<float> currentGainRamp { 1.0f };
+
+        std::vector<std::unique_ptr<juce::AudioProcessor>> inserts;
     };
 
     using Stretcher = signalsmith::stretch::SignalsmithStretch<float, void>;
@@ -120,6 +152,13 @@ private:
     void applyRateSettingsToTrack (Track& t);
     void recreateGlobalStretcher();
     bool isStretcherActive() const noexcept;
+
+    void releaseAllInsertProcessors();
+    void prepareAllInsertProcessors();
+    static void processInsertChain (std::vector<std::unique_ptr<juce::AudioProcessor>>& chain,
+                                     juce::AudioBuffer<float>& stereo);
+
+    void reconfigureTrackMeters (int numTracks);
 
     juce::AudioFormatManager formatManager;
     juce::OwnedArray<Track>  tracks;
@@ -156,6 +195,12 @@ private:
     int                        stretchNumChannels = 0;
     double                     stretchInputAccumulator = 0.0;
     std::atomic<bool>          stretchPendingReset { false };
+
+    std::vector<std::unique_ptr<juce::AudioProcessor>> masterInserts;
+
+    std::unique_ptr<std::atomic<float>[]> trackMeters;
+    int                                 trackMeterCount = 0;
+    std::atomic<float>                  masterMeter { 0.0f };
 
     juce::CriticalSection tracksLock;
 };

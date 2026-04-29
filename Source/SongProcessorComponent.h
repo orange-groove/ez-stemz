@@ -16,6 +16,8 @@
 namespace ezstemz
 {
 
+class MixerWindow;
+
 /**
     Player + processor screen for a single project.
 
@@ -97,6 +99,8 @@ private:
     void runMixExport (const juce::File& destinationWav);
     void runStemsExport (const juce::File& destinationFolder);
 
+    void mixButtonClicked();
+
     Project project;
     bool stemsLoaded = false;
 
@@ -110,6 +114,7 @@ private:
     juce::TextButton backButton    { "Back" };
     juce::TextButton exportMixButton   { "Export mix" };
     juce::TextButton exportStemsButton { "Export stems" };
+    juce::TextButton mixButton         { "Mix" };
     juce::TextButton zoomOutButton { "-" };
     juce::TextButton zoomInButton  { "+" };
     juce::TextButton zoomFitButton { "Fit" };
@@ -131,6 +136,7 @@ private:
 
     std::atomic<bool> exportRunning { false };
     std::unique_ptr<juce::FileChooser> exportFileChooser;
+    std::unique_ptr<MixerWindow>        mixerWindow;
 
     SpacebarShortcut spacebarShortcut { *this };
 };

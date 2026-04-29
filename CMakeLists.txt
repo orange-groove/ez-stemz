@@ -142,6 +142,10 @@ juce_add_gui_app(ezstemz
     PLIST_TO_MERGE               "${EZSTEMZ_PLIST_MERGE}"
 )
 
+if (APPLE)
+    set_target_properties (ezstemz PROPERTIES JUCE_PLUGINHOST_AU TRUE)
+endif()
+
 juce_generate_juce_header(ezstemz)
 
 target_sources(ezstemz PRIVATE
@@ -152,6 +156,8 @@ target_sources(ezstemz PRIVATE
     Source/SongProcessorComponent.h
     Source/MultitrackPlayer.cpp
     Source/MultitrackPlayer.h
+    Source/MixerWindow.cpp
+    Source/MixerWindow.h
     Source/MixdownExporter.cpp
     Source/MixdownExporter.h
     Source/TrackStripComponent.cpp
@@ -162,6 +168,10 @@ target_sources(ezstemz PRIVATE
     Source/LocalSeparator.h
     Source/AppConfig.cpp
     Source/AppConfig.h
+    Source/AppPluginRegistry.cpp
+    Source/AppPluginRegistry.h
+    Source/PluginPickerWindow.cpp
+    Source/PluginPickerWindow.h
     Source/Project.h
     Source/ProjectsLibrary.cpp
     Source/ProjectsLibrary.h
@@ -174,6 +184,7 @@ target_sources(ezstemz PRIVATE
 target_compile_definitions(ezstemz PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+    JUCE_PLUGINHOST_VST3=1
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:ezstemz,JUCE_PRODUCT_NAME>"
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:ezstemz,JUCE_VERSION>"
 )

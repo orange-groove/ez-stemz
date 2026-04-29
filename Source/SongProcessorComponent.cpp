@@ -1,6 +1,7 @@
 #include "SongProcessorComponent.h"
 
 #include "MixdownExporter.h"
+#include "MixerWindow.h"
 #include "AppConfig.h"
 #include "ProjectsLibrary.h"
 #include "SeparationService.h"
@@ -111,9 +112,11 @@ SongProcessorComponent::SongProcessorComponent (Project p)
     styleZoomBtn (zoomFitButton);
     styleZoomBtn (exportMixButton);
     styleZoomBtn (exportStemsButton);
+    styleZoomBtn (mixButton);
 
     exportMixButton.onClick   = [this] { exportMixClicked(); };
     exportStemsButton.onClick = [this] { exportStemsClicked(); };
+    mixButton.onClick         = [this] { mixButtonClicked(); };
 
     zoomOutButton.onClick = [this] { zoomBy (1.0 / 1.5); };
     zoomInButton .onClick = [this] { zoomBy (1.5); };
@@ -121,6 +124,7 @@ SongProcessorComponent::SongProcessorComponent (Project p)
 
     addChildComponent (exportMixButton);
     addChildComponent (exportStemsButton);
+    addChildComponent (mixButton);
     addChildComponent (zoomOutButton);
     addChildComponent (zoomInButton);
     addChildComponent (zoomFitButton);
@@ -183,6 +187,8 @@ SongProcessorComponent::SongProcessorComponent (Project p)
 
 SongProcessorComponent::~SongProcessorComponent()
 {
+    mixerWindow.reset();
+
     SeparationService::getInstance().removeChangeListener (this);
 
     hScrollBar.removeListener (this);
@@ -212,6 +218,8 @@ void SongProcessorComponent::resized()
     exportStemsButton.setBounds (header.removeFromRight (118));
     header.removeFromRight (6);
     exportMixButton.setBounds (header.removeFromRight (108));
+    header.removeFromRight (6);
+    mixButton.setBounds (header.removeFromRight (56));
     header.removeFromRight (12);
 
     headerLabel.setBounds (header);
@@ -393,10 +401,23 @@ void SongProcessorComponent::setZoomControlsVisible (bool v)
 {
     exportMixButton.setVisible (v);
     exportStemsButton.setVisible (v);
+    mixButton.setVisible (v);
     zoomOutButton.setVisible (v);
     zoomInButton .setVisible (v);
     zoomFitButton.setVisible (v);
     hScrollBar   .setVisible (v);
+}
+
+void SongProcessorComponent::mixButtonClicked()
+{
+    if (! stemsLoaded || exportRunning.load (std::memory_order_acquire))
+        return;
+
+    if (mixerWindow == nullptr)
+        mixerWindow = std::make_unique<MixerWindow> (player);
+
+    mixerWindow->setVisible (true);
+    mixerWindow->toFront (true);
 }
 
 void SongProcessorComponent::exportMixClicked()
@@ -514,6 +535,7 @@ void SongProcessorComponent::setExportUiRunning (bool running)
     const bool enable = ! running && stemsLoaded;
     exportMixButton.setEnabled (enable);
     exportStemsButton.setEnabled (enable);
+    mixButton.setEnabled (enable);
     backButton.setEnabled (! running);
 
     if (! running)

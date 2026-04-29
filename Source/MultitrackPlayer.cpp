@@ -1,17 +1,73 @@
 #include "MultitrackPlayer.h"
 
+#include "AppPluginRegistry.h"
 #include "signalsmith-stretch/signalsmith-stretch.h"
 
 #include <cmath>
+#include <memory>
 #include <vector>
 
 namespace ezstemz
 {
+namespace
+{
+
+float peakAbsLR (const juce::AudioBuffer<float>& buf, int numSamples)
+{
+    float       pk = 0.f;
+    const int   nCh = juce::jmin (2, buf.getNumChannels());
+    const int   n   = juce::jmin (numSamples, buf.getNumSamples());
+
+    for (int c = 0; c < nCh; ++c)
+    {
+        const float* p = buf.getReadPointer (c);
+        for (int s = 0; s < n; ++s)
+            pk = juce::jmax (pk, std::abs (p[s]));
+    }
+
+    return pk;
+}
+
+} // namespace
 
 MultitrackPlayer::MultitrackPlayer()
 {
     formatManager.registerBasicFormats();
     startTimerHz (30);
+}
+
+juce::AudioPluginFormatManager& MultitrackPlayer::getPluginFormatManager() noexcept
+{
+    return AppPluginRegistry::get().getFormatManager();
+}
+
+void MultitrackPlayer::reconfigureTrackMeters (int numTracks)
+{
+    trackMeters.reset();
+    trackMeterCount = numTracks;
+
+    if (numTracks > 0)
+    {
+        trackMeters = std::make_unique<std::atomic<float>[]> ((size_t) numTracks);
+
+        for (int i = 0; i < numTracks; ++i)
+            trackMeters[(size_t) i].store (0.0f, std::memory_order_relaxed);
+    }
+
+    masterMeter.store (0.0f, std::memory_order_relaxed);
+}
+
+float MultitrackPlayer::getTrackPostFaderMeter (int trackIndex) const noexcept
+{
+    if (trackMeters == nullptr || trackIndex < 0 || trackIndex >= trackMeterCount)
+        return 0.0f;
+
+    return trackMeters[(size_t) trackIndex].load (std::memory_order_relaxed);
+}
+
+float MultitrackPlayer::getMasterOutputMeter() const noexcept
+{
+    return masterMeter.load (std::memory_order_relaxed);
 }
 
 MultitrackPlayer::~MultitrackPlayer()
@@ -132,6 +188,8 @@ bool MultitrackPlayer::loadTracks (const juce::Array<juce::File>& files,
 
     {
         const juce::ScopedLock sl (tracksLock);
+        releaseAllInsertProcessors();
+
         tracks.clear();
         for (auto* t : next)
             tracks.add (t);
@@ -146,6 +204,8 @@ bool MultitrackPlayer::loadTracks (const juce::Array<juce::File>& files,
         }
 
         recreateGlobalStretcher();
+        prepareAllInsertProcessors();
+        reconfigureTrackMeters (tracks.size());
     }
 
     return true;
@@ -155,6 +215,8 @@ void MultitrackPlayer::clear()
 {
     pause();
     const juce::ScopedLock sl (tracksLock);
+    releaseAllInsertProcessors();
+
     for (auto* t : tracks)
         if (t->resamplingSource != nullptr)
             t->resamplingSource->releaseResources();
@@ -167,6 +229,7 @@ void MultitrackPlayer::clear()
     stretchInBuf.setSize (0, 0);
     stretchOutBuf.setSize (0, 0);
     stretchNumChannels = 0;
+    reconfigureTrackMeters (0);
 }
 
 int MultitrackPlayer::getNumTracks() const noexcept
@@ -318,11 +381,14 @@ void MultitrackPlayer::prepareToPlay (int samplesPerBlockExpected, double sr)
     }
 
     recreateGlobalStretcher();
+    prepareAllInsertProcessors();
 }
 
 void MultitrackPlayer::releaseResources()
 {
     const juce::ScopedLock sl (tracksLock);
+    releaseAllInsertProcessors();
+
     for (auto* t : tracks)
         if (t->resamplingSource != nullptr)
             t->resamplingSource->releaseResources();
@@ -340,11 +406,23 @@ void MultitrackPlayer::getNextAudioBlock (const juce::AudioSourceChannelInfo& in
     info.clearActiveBufferRegion();
 
     if (! playing.load())
+    {
+        const juce::ScopedLock sl (tracksLock);
+
+        if (trackMeters != nullptr)
+            for (int i = 0; i < trackMeterCount; ++i)
+                trackMeters[(size_t) i].store (0.0f, std::memory_order_relaxed);
+
+        masterMeter.store (0.0f, std::memory_order_relaxed);
         return;
+    }
 
     const juce::ScopedLock sl (tracksLock);
     if (tracks.isEmpty())
+    {
+        masterMeter.store (0.0f, std::memory_order_relaxed);
         return;
+    }
 
     const int   numSamples    = info.numSamples;
     const bool  soloActive    = anyTrackSoloed();
@@ -429,9 +507,22 @@ void MultitrackPlayer::getNextAudioBlock (const juce::AudioSourceChannelInfo& in
 
         for (int i = 0; i < tracks.size(); ++i)
         {
-            const float* trackChans[2] = { stretchOutBuf.getReadPointer (i * 2),
-                                           stretchOutBuf.getReadPointer (i * 2 + 1) };
-            mixTrackInto (*tracks.getUnchecked (i), trackChans, 2);
+            auto* t = tracks.getUnchecked (i);
+            trackBuffer.copyFrom (0, 0, stretchOutBuf, i * 2,     0, numSamples);
+            trackBuffer.copyFrom (1, 0, stretchOutBuf, i * 2 + 1, 0, numSamples);
+            processInsertChain (t->inserts, trackBuffer);
+
+            if (trackMeters != nullptr && i < trackMeterCount)
+            {
+                const bool  isAudible   = soloActive ? t->soloed.load() : ! t->muted.load();
+                const float trackTarget = isAudible ? t->gain.load() : 0.0f;
+                const float pk          = peakAbsLR (trackBuffer, numSamples);
+                trackMeters[(size_t) i].store (pk * trackTarget, std::memory_order_relaxed);
+            }
+
+            const float* trackChans[2] = { trackBuffer.getReadPointer (0),
+                                           trackBuffer.getReadPointer (1) };
+            mixTrackInto (*t, trackChans, 2);
         }
     }
     else
@@ -439,14 +530,28 @@ void MultitrackPlayer::getNextAudioBlock (const juce::AudioSourceChannelInfo& in
         // Bypass path: pull each stem at the device rate directly. Zero
         // added latency / CPU; pitch and tempo move together when the
         // playback rate is not 1.0 (vinyl mode), or both stay native (1.0).
-        for (auto* t : tracks)
+        for (int ti = 0; ti < tracks.size(); ++ti)
         {
+            auto* t = tracks.getUnchecked (ti);
             if (t->resamplingSource == nullptr)
                 continue;
 
             trackBuffer.clear (0, numSamples);
             juce::AudioSourceChannelInfo localInfo (&trackBuffer, 0, numSamples);
             t->resamplingSource->getNextAudioBlock (localInfo);
+
+            if (t->reader != nullptr && t->reader->numChannels == 1)
+                trackBuffer.copyFrom (1, 0, trackBuffer, 0, 0, numSamples);
+
+            processInsertChain (t->inserts, trackBuffer);
+
+            if (trackMeters != nullptr && ti < trackMeterCount)
+            {
+                const bool  isAudible   = soloActive ? t->soloed.load() : ! t->muted.load();
+                const float trackTarget = isAudible ? t->gain.load() : 0.0f;
+                const float pk          = peakAbsLR (trackBuffer, numSamples);
+                trackMeters[(size_t) ti].store (pk * trackTarget, std::memory_order_relaxed);
+            }
 
             const float* trackChans[2] = { trackBuffer.getReadPointer (0),
                                            trackBuffer.getNumChannels() > 1
@@ -456,7 +561,27 @@ void MultitrackPlayer::getNextAudioBlock (const juce::AudioSourceChannelInfo& in
         }
     }
 
+    if (outChannels >= 2 && ! masterInserts.empty())
+    {
+        float* ptrs[2] = { info.buffer->getWritePointer (0, info.startSample),
+                           info.buffer->getWritePointer (1, info.startSample) };
+        juce::AudioBuffer<float> masterBuf (ptrs, 2, numSamples);
+        processInsertChain (masterInserts, masterBuf);
+    }
+
     currentMasterGainRamp = masterTarget;
+
+    {
+        float       pk = 0.0f;
+        const int   j0 = info.startSample;
+        const int   nc = juce::jmax (1, juce::jmin (2, outChannels));
+
+        for (int s = 0; s < numSamples; ++s)
+            for (int c = 0; c < nc; ++c)
+                pk = juce::jmax (pk, std::abs (info.buffer->getSample (c, j0 + s)));
+
+        masterMeter.store (pk, std::memory_order_relaxed);
+    }
 
     // Advance the master playhead by elapsed song-time. Both modes consume
     // input at `rate × deviceRate` samples/sec, so playhead bookkeeping is
@@ -472,6 +597,161 @@ void MultitrackPlayer::getNextAudioBlock (const juce::AudioSourceChannelInfo& in
         playing.store (false);
     }
     playheadSeconds.store (pos);
+}
+
+void MultitrackPlayer::releaseAllInsertProcessors()
+{
+    for (auto* t : tracks)
+    {
+        for (auto& p : t->inserts)
+            if (p != nullptr)
+                p->releaseResources();
+
+        t->inserts.clear();
+    }
+
+    for (auto& p : masterInserts)
+        if (p != nullptr)
+            p->releaseResources();
+
+    masterInserts.clear();
+}
+
+void MultitrackPlayer::prepareAllInsertProcessors()
+{
+    for (auto* t : tracks)
+        for (auto& p : t->inserts)
+            if (p != nullptr)
+                p->prepareToPlay (deviceSampleRate, deviceBlockSize);
+
+    for (auto& p : masterInserts)
+        if (p != nullptr)
+            p->prepareToPlay (deviceSampleRate, deviceBlockSize);
+}
+
+void MultitrackPlayer::processInsertChain (std::vector<std::unique_ptr<juce::AudioProcessor>>& chain,
+                                           juce::AudioBuffer<float>& stereo)
+{
+    if (chain.empty() || stereo.getNumChannels() < 2)
+        return;
+
+    juce::MidiBuffer midi;
+
+    for (auto& p : chain)
+    {
+        if (p == nullptr)
+            continue;
+
+        bool bypassed = false;
+        if (auto* bp = p->getBypassParameter())
+            bypassed = (bp->getValue() >= 0.5f);
+
+        if (bypassed)
+            p->processBlockBypassed (stereo, midi);
+        else
+            p->processBlock (stereo, midi);
+    }
+}
+
+void MultitrackPlayer::addTrackInsert (int trackIndex, std::unique_ptr<juce::AudioProcessor> proc)
+{
+    if (proc == nullptr)
+        return;
+
+    const juce::ScopedLock sl (tracksLock);
+
+    if (! juce::isPositiveAndBelow (trackIndex, tracks.size()))
+        return;
+
+    if (prepared)
+        proc->prepareToPlay (deviceSampleRate, deviceBlockSize);
+
+    tracks.getUnchecked (trackIndex)->inserts.push_back (std::move (proc));
+}
+
+void MultitrackPlayer::removeTrackInsert (int trackIndex, int insertIndex)
+{
+    const juce::ScopedLock sl (tracksLock);
+
+    if (! juce::isPositiveAndBelow (trackIndex, tracks.size()))
+        return;
+
+    auto& ins = tracks.getUnchecked (trackIndex)->inserts;
+
+    if (! juce::isPositiveAndBelow (insertIndex, (int) ins.size()))
+        return;
+
+    if (ins[(size_t) insertIndex] != nullptr)
+        ins[(size_t) insertIndex]->releaseResources();
+
+    ins.erase (ins.begin() + insertIndex);
+}
+
+int MultitrackPlayer::getNumTrackInserts (int trackIndex) const
+{
+    const juce::ScopedLock sl (tracksLock);
+
+    if (! juce::isPositiveAndBelow (trackIndex, tracks.size()))
+        return 0;
+
+    return (int) tracks.getUnchecked (trackIndex)->inserts.size();
+}
+
+juce::AudioProcessor* MultitrackPlayer::getTrackInsert (int trackIndex, int insertIndex) const noexcept
+{
+    const juce::ScopedLock sl (tracksLock);
+
+    if (! juce::isPositiveAndBelow (trackIndex, tracks.size()))
+        return nullptr;
+
+    const auto& ins = tracks.getUnchecked (trackIndex)->inserts;
+
+    if (! juce::isPositiveAndBelow (insertIndex, (int) ins.size()))
+        return nullptr;
+
+    return ins[(size_t) insertIndex].get();
+}
+
+void MultitrackPlayer::addMasterInsert (std::unique_ptr<juce::AudioProcessor> proc)
+{
+    if (proc == nullptr)
+        return;
+
+    const juce::ScopedLock sl (tracksLock);
+
+    if (prepared)
+        proc->prepareToPlay (deviceSampleRate, deviceBlockSize);
+
+    masterInserts.push_back (std::move (proc));
+}
+
+void MultitrackPlayer::removeMasterInsert (int insertIndex)
+{
+    const juce::ScopedLock sl (tracksLock);
+
+    if (! juce::isPositiveAndBelow (insertIndex, (int) masterInserts.size()))
+        return;
+
+    if (masterInserts[(size_t) insertIndex] != nullptr)
+        masterInserts[(size_t) insertIndex]->releaseResources();
+
+    masterInserts.erase (masterInserts.begin() + insertIndex);
+}
+
+int MultitrackPlayer::getNumMasterInserts() const
+{
+    const juce::ScopedLock sl (tracksLock);
+    return (int) masterInserts.size();
+}
+
+juce::AudioProcessor* MultitrackPlayer::getMasterInsert (int insertIndex) const noexcept
+{
+    const juce::ScopedLock sl (tracksLock);
+
+    if (! juce::isPositiveAndBelow (insertIndex, (int) masterInserts.size()))
+        return nullptr;
+
+    return masterInserts[(size_t) insertIndex].get();
 }
 
 void MultitrackPlayer::timerCallback()

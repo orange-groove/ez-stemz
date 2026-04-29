@@ -1,6 +1,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "AppConfig.h"
+#include "AppPluginRegistry.h"
 #include "MainComponent.h"
 #include "SeparationService.h"
 
@@ -19,12 +20,14 @@ public:
     void initialise (const juce::String&) override
     {
         AppConfig::get(); // load saved settings
+        AppPluginRegistry::get().initialise();
         mainWindow = std::make_unique<MainWindow> (getApplicationName());
     }
 
     void shutdown() override
     {
         mainWindow = nullptr;
+        AppPluginRegistry::get().shutdownSave();
         SeparationService::shutdown();
     }
 
