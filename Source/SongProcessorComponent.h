@@ -1,5 +1,9 @@
 #pragma once
 
+#include <atomic>
+#include <functional>
+#include <memory>
+
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -70,6 +74,13 @@ private:
     void rebuildTrackStrips();
     void setProgress (float p, const juce::String& msg);
 
+    void exportMixClicked();
+    void exportStemsClicked();
+    void maybeWarnPlaybackRateThen (std::function<void()> proceed);
+    void postExportProgress (float p, const juce::String& msg);
+    void postExportFinished (bool ok, const juce::String& detail, const juce::String& err);
+    void setExportUiRunning (bool running);
+
     // ---- zoom / scroll ----
     int  getWaveformWidthPx() const;
     void zoomToFit();
@@ -83,6 +94,9 @@ private:
     void autoScrollToPlayhead (double currentSec);
     void setZoomControlsVisible (bool v);
 
+    void runMixExport (const juce::File& destinationWav);
+    void runStemsExport (const juce::File& destinationFolder);
+
     Project project;
     bool stemsLoaded = false;
 
@@ -94,6 +108,8 @@ private:
     juce::AudioDeviceManager deviceManager;
 
     juce::TextButton backButton    { "Back" };
+    juce::TextButton exportMixButton   { "Export mix" };
+    juce::TextButton exportStemsButton { "Export stems" };
     juce::TextButton zoomOutButton { "-" };
     juce::TextButton zoomInButton  { "+" };
     juce::TextButton zoomFitButton { "Fit" };
@@ -112,6 +128,9 @@ private:
     double pixelsPerSecond = 0.0;
     double scrollSeconds   = 0.0;
     double trackLength     = 0.0;
+
+    std::atomic<bool> exportRunning { false };
+    std::unique_ptr<juce::FileChooser> exportFileChooser;
 
     SpacebarShortcut spacebarShortcut { *this };
 };

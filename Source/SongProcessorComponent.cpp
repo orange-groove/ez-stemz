@@ -1,8 +1,11 @@
 #include "SongProcessorComponent.h"
 
+#include "MixdownExporter.h"
 #include "AppConfig.h"
 #include "ProjectsLibrary.h"
 #include "SeparationService.h"
+
+#include <thread>
 
 namespace ezstemz
 {
@@ -106,11 +109,18 @@ SongProcessorComponent::SongProcessorComponent (Project p)
     styleZoomBtn (zoomOutButton);
     styleZoomBtn (zoomInButton);
     styleZoomBtn (zoomFitButton);
+    styleZoomBtn (exportMixButton);
+    styleZoomBtn (exportStemsButton);
+
+    exportMixButton.onClick   = [this] { exportMixClicked(); };
+    exportStemsButton.onClick = [this] { exportStemsClicked(); };
 
     zoomOutButton.onClick = [this] { zoomBy (1.0 / 1.5); };
     zoomInButton .onClick = [this] { zoomBy (1.5); };
     zoomFitButton.onClick = [this] { zoomToFit(); };
 
+    addChildComponent (exportMixButton);
+    addChildComponent (exportStemsButton);
     addChildComponent (zoomOutButton);
     addChildComponent (zoomInButton);
     addChildComponent (zoomFitButton);
@@ -191,13 +201,17 @@ void SongProcessorComponent::resized()
     backButton.setBounds (header.removeFromLeft (90));
     header.removeFromLeft (12);
 
-    // Zoom controls live in the top-right of the header.
+    // Zoom + export controls live in the top-right of the header.
     const int zoomBtnW = 36;
     zoomFitButton.setBounds (header.removeFromRight (52));
     header.removeFromRight (4);
     zoomInButton .setBounds (header.removeFromRight (zoomBtnW));
     header.removeFromRight (4);
     zoomOutButton.setBounds (header.removeFromRight (zoomBtnW));
+    header.removeFromRight (12);
+    exportStemsButton.setBounds (header.removeFromRight (118));
+    header.removeFromRight (6);
+    exportMixButton.setBounds (header.removeFromRight (108));
     header.removeFromRight (12);
 
     headerLabel.setBounds (header);
@@ -377,10 +391,273 @@ int SongProcessorComponent::getWaveformWidthPx() const
 
 void SongProcessorComponent::setZoomControlsVisible (bool v)
 {
+    exportMixButton.setVisible (v);
+    exportStemsButton.setVisible (v);
     zoomOutButton.setVisible (v);
     zoomInButton .setVisible (v);
     zoomFitButton.setVisible (v);
     hScrollBar   .setVisible (v);
+}
+
+void SongProcessorComponent::exportMixClicked()
+{
+    if (! stemsLoaded || exportRunning.load (std::memory_order_acquire))
+        return;
+
+    exportFileChooser = std::make_unique<juce::FileChooser> ("Export stereo mix as WAV",
+                                                              juce::File(),
+                                                              "*.wav");
+
+    auto flags = juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles;
+
+    exportFileChooser->launchAsync (flags,
+                                    [this] (const juce::FileChooser& fc)
+                                    {
+                                        auto f = fc.getResult();
+                                        if (f == juce::File())
+                                            return;
+
+                                        if (! f.hasFileExtension (".wav"))
+                                            f = f.withFileExtension (".wav");
+
+                                        maybeWarnPlaybackRateThen ([this, f] { runMixExport (f); });
+                                    });
+}
+
+void SongProcessorComponent::exportStemsClicked()
+{
+    if (! stemsLoaded || exportRunning.load (std::memory_order_acquire))
+        return;
+
+    exportFileChooser = std::make_unique<juce::FileChooser> ("Choose folder for stem WAV files",
+                                                              juce::File(),
+                                                              "*");
+
+    const auto flags = juce::FileBrowserComponent::openMode
+                       | juce::FileBrowserComponent::canSelectDirectories;
+
+    exportFileChooser->launchAsync (flags,
+                                    [this] (const juce::FileChooser& fc)
+                                    {
+                                        auto dir = fc.getResult();
+                                        if (dir == juce::File() || ! dir.isDirectory())
+                                            return;
+
+                                        maybeWarnPlaybackRateThen ([this, dir] { runStemsExport (dir); });
+                                    });
+}
+
+void SongProcessorComponent::maybeWarnPlaybackRateThen (std::function<void()> proceed)
+{
+    if (juce::approximatelyEqual (player.getPlaybackRate(), 1.0f))
+    {
+        proceed();
+        return;
+    }
+
+    auto opts = juce::MessageBoxOptions()
+                    .withIconType (juce::MessageBoxIconType::QuestionIcon)
+                    .withTitle ("Export speed")
+                    .withMessage ("WAV export is rendered at normal speed (1.0×). Your transport is "
+                                  "not at 1.0×, so the file will not match what you hear right now. Continue?")
+                    .withButton ("Export")
+                    .withButton ("Cancel");
+
+    juce::AlertWindow::showAsync (opts,
+                                  juce::ModalCallbackFunction::create ([onProceed = std::move (proceed)] (int r)
+                                                                       {
+                                                                           if (r == 1)
+                                                                               onProceed();
+                                                                       }));
+}
+
+void SongProcessorComponent::postExportProgress (float p, const juce::String& msg)
+{
+    juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<SongProcessorComponent> (this),
+                                      p,
+                                      msg]
+                                     {
+                                         if (auto* c = safe.getComponent())
+                                         {
+                                             c->progressBar.setVisible (true);
+                                             c->setProgress (p, msg);
+                                         }
+                                     });
+}
+
+void SongProcessorComponent::postExportFinished (bool ok,
+                                               const juce::String& detail,
+                                               const juce::String& err)
+{
+    juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<SongProcessorComponent> (this),
+                                      ok,
+                                      detail,
+                                      err]
+                                     {
+                                         if (auto* c = safe.getComponent())
+                                             c->setExportUiRunning (false);
+
+                                         if (ok)
+                                             juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::InfoIcon,
+                                                                                     "Export",
+                                                                                     detail);
+                                         else
+                                             juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+                                                                                     "Export failed",
+                                                                                     err);
+                                     });
+}
+
+void SongProcessorComponent::setExportUiRunning (bool running)
+{
+    exportRunning.store (running, std::memory_order_release);
+    const bool enable = ! running && stemsLoaded;
+    exportMixButton.setEnabled (enable);
+    exportStemsButton.setEnabled (enable);
+    backButton.setEnabled (! running);
+
+    if (! running)
+        progressBar.setVisible (false);
+}
+
+namespace
+{
+struct StemExportItem
+{
+    juce::File   file;
+    juce::String stemName;
+    float        linearGain = 1.0f;
+};
+} // namespace
+
+void SongProcessorComponent::runMixExport (const juce::File& destinationWav)
+{
+    if (exportRunning.exchange (true, std::memory_order_acq_rel))
+        return;
+
+    player.pause();
+    setExportUiRunning (true);
+    progressBar.setVisible (true);
+    setProgress (0.0f, "Preparing mix export...");
+
+    juce::Array<MixdownExporter::TrackMixSource> specs;
+    specs.ensureStorageAllocated (player.getNumTracks());
+
+    for (int i = 0; i < player.getNumTracks(); ++i)
+    {
+        MixdownExporter::TrackMixSource s;
+        s.file       = player.getTrackInfo (i).file;
+        s.linearGain = player.getTrackGain (i);
+        s.muted      = player.isTrackMuted (i);
+        s.soloed     = player.isTrackSoloed (i);
+        specs.add (s);
+    }
+
+    const float master = player.getMasterGain();
+    auto        safe   = juce::Component::SafePointer<SongProcessorComponent> (this);
+
+    std::thread ([safe, specs, master, destinationWav]() mutable
+                 {
+                     juce::String err;
+                     juce::AudioFormatManager fm;
+                     fm.registerBasicFormats();
+
+                     const bool ok = MixdownExporter::writeStereoMixWav (fm,
+                                                                         specs,
+                                                                         master,
+                                                                         destinationWav,
+                                                                         [safe] (float p, const juce::String& m)
+                                                                         {
+                                                                             if (auto* c = safe.getComponent())
+                                                                                 c->postExportProgress (p, m);
+                                                                         },
+                                                                         err);
+
+                     if (auto* c = safe.getComponent())
+                     {
+                         if (ok)
+                             c->postExportFinished (true,
+                                                    "Saved mix to:\n" + destinationWav.getFullPathName(),
+                                                    {});
+                         else
+                             c->postExportFinished (false, {}, err);
+                     }
+                 })
+        .detach();
+}
+
+void SongProcessorComponent::runStemsExport (const juce::File& folder)
+{
+    if (exportRunning.exchange (true, std::memory_order_acq_rel))
+        return;
+
+    player.pause();
+    setExportUiRunning (true);
+    progressBar.setVisible (true);
+    setProgress (0.0f, "Preparing stem export...");
+
+    juce::Array<StemExportItem> items;
+    items.ensureStorageAllocated (player.getNumTracks());
+
+    const juce::String projectBase = juce::File::createLegalFileName (project.name);
+
+    for (int i = 0; i < player.getNumTracks(); ++i)
+    {
+        StemExportItem it;
+        it.file       = player.getTrackInfo (i).file;
+        it.stemName   = player.getTrackInfo (i).name;
+        it.linearGain = player.getTrackGain (i);
+        items.add (std::move (it));
+    }
+
+    auto safe = juce::Component::SafePointer<SongProcessorComponent> (this);
+
+    std::thread ([safe, items, folder, projectBase]() mutable
+                 {
+                     juce::AudioFormatManager fm;
+                     fm.registerBasicFormats();
+
+                     const int n = items.size();
+                     juce::String lastPath;
+
+                     for (int ti = 0; ti < n; ++ti)
+                     {
+                         const auto& it = items.getReference (ti);
+                         auto        base = projectBase + " - "
+                                      + juce::File::createLegalFileName (it.stemName);
+                         auto dest = folder.getChildFile (base + ".wav");
+
+                         juce::String err;
+                         const bool   ok = MixdownExporter::writeStemWavWithGain (
+                             fm,
+                             it.file,
+                             it.linearGain,
+                             dest,
+                             [safe, ti, n, stem = it.stemName] (float p, const juce::String&)
+                             {
+                                 const float overall = (float) (ti + p) / (float) juce::jmax (1, n);
+                                 if (auto* c = safe.getComponent())
+                                     c->postExportProgress (overall,
+                                                            "Exporting " + stem + " (" + juce::String (ti + 1) + " of "
+                                                                + juce::String (n) + ")...");
+                             },
+                             err);
+
+                         if (! ok)
+                         {
+                             if (auto* c = safe.getComponent())
+                                 c->postExportFinished (false, {}, err);
+                             return;
+                         }
+                     }
+
+                     if (auto* c = safe.getComponent())
+                         c->postExportFinished (true,
+                                                "Exported " + juce::String (n) + " stems to:\n"
+                                                    + folder.getFullPathName(),
+                                                {});
+                 })
+        .detach();
 }
 
 void SongProcessorComponent::zoomToFit()

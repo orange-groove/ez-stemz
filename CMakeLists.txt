@@ -152,6 +152,8 @@ target_sources(ezstemz PRIVATE
     Source/SongProcessorComponent.h
     Source/MultitrackPlayer.cpp
     Source/MultitrackPlayer.h
+    Source/MixdownExporter.cpp
+    Source/MixdownExporter.h
     Source/TrackStripComponent.cpp
     Source/TrackStripComponent.h
     Source/TransportBar.cpp
