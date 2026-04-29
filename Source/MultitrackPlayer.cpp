@@ -1,5 +1,10 @@
 #include "MultitrackPlayer.h"
 
+#include "signalsmith-stretch/signalsmith-stretch.h"
+
+#include <cmath>
+#include <vector>
+
 namespace ezstemz
 {
 
@@ -15,15 +20,36 @@ MultitrackPlayer::~MultitrackPlayer()
     releaseResources();
 }
 
+bool MultitrackPlayer::isStretcherActive() const noexcept
+{
+    const float r = playbackRate.load();
+    return preservePitch.load() && std::abs (r - 1.0f) > 1.0e-4f;
+}
+
+void MultitrackPlayer::applyRateSettingsToTrack (Track& t)
+{
+    if (t.reader == nullptr || t.resamplingSource == nullptr)
+        return;
+
+    const double fileRate = t.reader->sampleRate > 0 ? t.reader->sampleRate
+                                                     : deviceSampleRate;
+    const double rate     = (double) playbackRate.load();
+    const bool   preserve = preservePitch.load();
+
+    // Pitch-preserving path: resampler does file→device only, the global
+    // stretcher handles the speed change downstream.
+    // Vinyl path: resampler does both file→device AND speed/pitch shift.
+    const double resamplerRatio = (fileRate / deviceSampleRate) * (preserve ? 1.0 : rate);
+    t.resamplingSource->setResamplingRatio (resamplerRatio);
+}
+
 void MultitrackPlayer::prepareTrackForPlayback (Track& t)
 {
     if (! prepared || t.resamplingSource == nullptr || t.reader == nullptr)
         return;
 
-    const double fileRate = t.reader->sampleRate > 0 ? t.reader->sampleRate : deviceSampleRate;
-    const double rate     = (double) playbackRate.load();
-    t.resamplingSource->setResamplingRatio ((fileRate / deviceSampleRate) * rate);
     t.resamplingSource->prepareToPlay (deviceBlockSize, deviceSampleRate);
+    applyRateSettingsToTrack (t);
 }
 
 void MultitrackPlayer::setTrackPositionInFileSamples (Track& t, juce::int64 fileSamples)
@@ -40,6 +66,38 @@ void MultitrackPlayer::setTrackPositionInFileSamples (Track& t, juce::int64 file
 
     if (t.resamplingSource != nullptr)
         t.resamplingSource->flushBuffers();
+}
+
+void MultitrackPlayer::recreateGlobalStretcher()
+{
+    // Caller must hold tracksLock.
+    if (! prepared || tracks.isEmpty())
+    {
+        globalStretch.reset();
+        stretchInBuf.setSize (0, 0);
+        stretchOutBuf.setSize (0, 0);
+        stretchNumChannels = 0;
+        return;
+    }
+
+    stretchNumChannels = tracks.size() * 2;
+
+    // Worst-case input is 4x the device block size (max playback rate).
+    stretchInBuf .setSize (stretchNumChannels, deviceBlockSize * 5, false, true, true);
+    stretchOutBuf.setSize (stretchNumChannels, deviceBlockSize,     false, true, true);
+    stretchInBuf .clear();
+    stretchOutBuf.clear();
+
+    globalStretch = std::make_unique<Stretcher>();
+    // splitComputation = true spreads the spectral compute across audio
+    // blocks instead of bursting at spectral boundaries. Costs one extra
+    // interval of latency but is much friendlier to the realtime deadline,
+    // which matters because we run the stretcher across `numTracks * 2`
+    // channels in a single process() call.
+    globalStretch->presetDefault (stretchNumChannels, deviceSampleRate, /*splitComputation=*/ true);
+    globalStretch->reset();
+    stretchInputAccumulator = 0.0;
+    stretchPendingReset.store (false);
 }
 
 bool MultitrackPlayer::loadTracks (const juce::Array<juce::File>& files,
@@ -59,8 +117,8 @@ bool MultitrackPlayer::loadTracks (const juce::Array<juce::File>& files,
         t->name   = i < names.size() ? names[i] : f.getFileNameWithoutExtension();
         t->file   = f;
         t->reader.reset (reader);
-        t->readerSource = std::make_unique<juce::AudioFormatReaderSource> (t->reader.get(), false);
-        t->resamplingSource = std::make_unique<juce::ResamplingAudioSource> (t->readerSource.get(), false, 2);
+        t->readerSource     = std::make_unique<juce::AudioFormatReaderSource> (t->reader.get(), false);
+        t->resamplingSource = std::make_unique<juce::ResamplingAudioSource>   (t->readerSource.get(), false, 2);
         next.add (t);
 
         TrackInfo info;
@@ -86,6 +144,8 @@ bool MultitrackPlayer::loadTracks (const juce::Array<juce::File>& files,
             prepareTrackForPlayback (*t);
             setTrackPositionInFileSamples (*t, 0);
         }
+
+        recreateGlobalStretcher();
     }
 
     return true;
@@ -96,13 +156,17 @@ void MultitrackPlayer::clear()
     pause();
     const juce::ScopedLock sl (tracksLock);
     for (auto* t : tracks)
-    {
         if (t->resamplingSource != nullptr)
             t->resamplingSource->releaseResources();
-    }
+
     tracks.clear();
     trackInfos.clear();
     playheadSeconds.store (0.0);
+
+    globalStretch.reset();
+    stretchInBuf.setSize (0, 0);
+    stretchOutBuf.setSize (0, 0);
+    stretchNumChannels = 0;
 }
 
 int MultitrackPlayer::getNumTracks() const noexcept
@@ -147,6 +211,8 @@ void MultitrackPlayer::setPositionSeconds (double seconds)
             setTrackPositionInFileSamples (*t, fileSamples);
         }
     }
+
+    stretchPendingReset.store (true);
 }
 
 void MultitrackPlayer::setTrackGain (int index, float linearGain)
@@ -190,8 +256,22 @@ float MultitrackPlayer::getMasterGain() const noexcept { return masterGain.load(
 
 void MultitrackPlayer::setPlaybackRate (float r)
 {
-    r = juce::jlimit (0.25f, 4.0f, r);
-    playbackRate.store (r);
+    playbackRate.store (juce::jlimit (0.25f, 4.0f, r));
+
+    if (! prepared)
+        return;
+
+    const juce::ScopedLock sl (tracksLock);
+    for (auto* t : tracks)
+        applyRateSettingsToTrack (*t);
+}
+
+float MultitrackPlayer::getPlaybackRate() const noexcept { return playbackRate.load(); }
+
+void MultitrackPlayer::setPreservePitch (bool shouldPreservePitch)
+{
+    if (preservePitch.exchange (shouldPreservePitch) == shouldPreservePitch)
+        return;
 
     if (! prepared)
         return;
@@ -199,15 +279,18 @@ void MultitrackPlayer::setPlaybackRate (float r)
     const juce::ScopedLock sl (tracksLock);
     for (auto* t : tracks)
     {
-        if (t->resamplingSource == nullptr || t->reader == nullptr)
-            continue;
+        applyRateSettingsToTrack (*t);
 
-        const double fileRate = t->reader->sampleRate > 0 ? t->reader->sampleRate : deviceSampleRate;
-        t->resamplingSource->setResamplingRatio ((fileRate / deviceSampleRate) * (double) r);
+        // Switching modes leaves residual state in the resampler that's no
+        // longer valid; flush it so the next block starts fresh.
+        if (t->resamplingSource != nullptr)
+            t->resamplingSource->flushBuffers();
     }
+
+    stretchPendingReset.store (true);
 }
 
-float MultitrackPlayer::getPlaybackRate() const noexcept { return playbackRate.load(); }
+bool MultitrackPlayer::getPreservePitch() const noexcept { return preservePitch.load(); }
 
 bool MultitrackPlayer::anyTrackSoloed() const noexcept
 {
@@ -229,12 +312,12 @@ void MultitrackPlayer::prepareToPlay (int samplesPerBlockExpected, double sr)
     for (auto* t : tracks)
     {
         prepareTrackForPlayback (*t);
-        // Reset the playhead so the first block reads from the right place
-        // and the resampler starts with empty state.
         if (t->reader != nullptr)
             setTrackPositionInFileSamples (*t,
                 (juce::int64) (playheadSeconds.load() * t->reader->sampleRate));
     }
+
+    recreateGlobalStretcher();
 }
 
 void MultitrackPlayer::releaseResources()
@@ -245,6 +328,10 @@ void MultitrackPlayer::releaseResources()
             t->resamplingSource->releaseResources();
 
     trackBuffer.setSize (0, 0);
+    globalStretch.reset();
+    stretchInBuf.setSize (0, 0);
+    stretchOutBuf.setSize (0, 0);
+    stretchNumChannels = 0;
     prepared = false;
 }
 
@@ -259,51 +346,121 @@ void MultitrackPlayer::getNextAudioBlock (const juce::AudioSourceChannelInfo& in
     if (tracks.isEmpty())
         return;
 
-    const int numSamples       = info.numSamples;
-    const bool soloActive      = anyTrackSoloed();
-    const float masterTarget   = masterGain.load();
-    const int   outChannels    = info.buffer->getNumChannels();
+    const int   numSamples    = info.numSamples;
+    const bool  soloActive    = anyTrackSoloed();
+    const float masterTarget  = masterGain.load();
+    const int   outChannels   = info.buffer->getNumChannels();
+    const bool  useStretcher  = isStretcherActive() && globalStretch != nullptr
+                                && stretchNumChannels == tracks.size() * 2;
 
     if (trackBuffer.getNumSamples() < numSamples)
         trackBuffer.setSize (2, numSamples, false, false, true);
 
-    for (auto* t : tracks)
+    auto mixTrackInto = [&] (Track& t, const float* const* trackChans, int trackChanCount)
     {
-        if (t->resamplingSource == nullptr)
-            continue;
+        const bool  isAudible   = soloActive ? t.soloed.load() : ! t.muted.load();
+        const float trackTarget = isAudible ? t.gain.load() : 0.0f;
 
-        trackBuffer.clear (0, numSamples);
-        juce::AudioSourceChannelInfo localInfo (&trackBuffer, 0, numSamples);
-        t->resamplingSource->getNextAudioBlock (localInfo);
-
-        const bool isAudible = soloActive ? t->soloed.load() : ! t->muted.load();
-        const float trackTarget = isAudible ? t->gain.load() : 0.0f;
-
-        const float startGain = t->currentGainRamp.load() * currentMasterGainRamp;
+        const float startGain = t.currentGainRamp.load() * currentMasterGainRamp;
         const float endGain   = trackTarget * masterTarget;
 
         for (int ch = 0; ch < outChannels; ++ch)
         {
-            const int srcCh = juce::jmin (ch, trackBuffer.getNumChannels() - 1);
+            const int srcCh = juce::jmin (ch, trackChanCount - 1);
             if (srcCh < 0)
                 continue;
 
             info.buffer->addFromWithRamp (ch,
                                           info.startSample,
-                                          trackBuffer.getReadPointer (srcCh, 0),
+                                          trackChans[srcCh],
                                           numSamples,
                                           startGain,
                                           endGain);
         }
 
-        t->currentGainRamp.store (trackTarget);
+        t.currentGainRamp.store (trackTarget);
+    };
+
+    if (useStretcher)
+    {
+        // Single global stretcher across every stem keeps the FFT windows
+        // phase-coherent so summing the stems doesn't flutter / comb.
+        const double rate = (double) playbackRate.load();
+        stretchInputAccumulator += (double) numSamples * rate;
+        const int inSamples = juce::jmax (1, (int) stretchInputAccumulator);
+        stretchInputAccumulator -= (double) inSamples;
+
+        if (stretchInBuf.getNumSamples() < inSamples)
+            stretchInBuf.setSize (stretchNumChannels, inSamples, false, false, true);
+
+        stretchInBuf.clear (0, inSamples);
+
+        // Pull each stem into its own stereo channel pair within stretchInBuf.
+        for (int i = 0; i < tracks.size(); ++i)
+        {
+            auto* t = tracks.getUnchecked (i);
+            if (t->resamplingSource == nullptr)
+                continue;
+
+            float* chPtrs[2] = { stretchInBuf.getWritePointer (i * 2),
+                                 stretchInBuf.getWritePointer (i * 2 + 1) };
+            juce::AudioBuffer<float> sub (chPtrs, 2, inSamples);
+            juce::AudioSourceChannelInfo subInfo (&sub, 0, inSamples);
+            t->resamplingSource->getNextAudioBlock (subInfo);
+        }
+
+        if (stretchPendingReset.exchange (false))
+        {
+            globalStretch->reset();
+            stretchInputAccumulator = 0.0;
+        }
+
+        // Build raw pointer arrays for the stretcher.
+        std::vector<const float*> inPtrs  ((size_t) stretchNumChannels);
+        std::vector<float*>       outPtrs ((size_t) stretchNumChannels);
+        for (int k = 0; k < stretchNumChannels; ++k)
+        {
+            inPtrs[(size_t) k]  = stretchInBuf .getReadPointer  (k);
+            outPtrs[(size_t) k] = stretchOutBuf.getWritePointer (k);
+        }
+
+        globalStretch->process (inPtrs.data(), inSamples,
+                                outPtrs.data(), numSamples);
+
+        for (int i = 0; i < tracks.size(); ++i)
+        {
+            const float* trackChans[2] = { stretchOutBuf.getReadPointer (i * 2),
+                                           stretchOutBuf.getReadPointer (i * 2 + 1) };
+            mixTrackInto (*tracks.getUnchecked (i), trackChans, 2);
+        }
+    }
+    else
+    {
+        // Bypass path: pull each stem at the device rate directly. Zero
+        // added latency / CPU; pitch and tempo move together when the
+        // playback rate is not 1.0 (vinyl mode), or both stay native (1.0).
+        for (auto* t : tracks)
+        {
+            if (t->resamplingSource == nullptr)
+                continue;
+
+            trackBuffer.clear (0, numSamples);
+            juce::AudioSourceChannelInfo localInfo (&trackBuffer, 0, numSamples);
+            t->resamplingSource->getNextAudioBlock (localInfo);
+
+            const float* trackChans[2] = { trackBuffer.getReadPointer (0),
+                                           trackBuffer.getNumChannels() > 1
+                                               ? trackBuffer.getReadPointer (1)
+                                               : trackBuffer.getReadPointer (0) };
+            mixTrackInto (*t, trackChans, 2);
+        }
     }
 
     currentMasterGainRamp = masterTarget;
 
-    // Advance the master playhead by elapsed song-time (wall-clock scaled
-    // by the current playback rate, so the playhead stays in sync with
-    // what the resamplers are actually consuming from the source files).
+    // Advance the master playhead by elapsed song-time. Both modes consume
+    // input at `rate × deviceRate` samples/sec, so playhead bookkeeping is
+    // identical.
     const double rate    = (double) playbackRate.load();
     const double elapsed = (double) numSamples / deviceSampleRate * rate;
     const double total   = getLengthSeconds();

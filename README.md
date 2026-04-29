@@ -149,3 +149,88 @@ the WAVs later if you want to reuse them outside the app.
   at internally.
 - The 6-stem model produces `drums, bass, other, vocals, guitar, piano`. The
   4-stem model drops `guitar, piano`.
+
+## Distribution (macOS)
+
+EZStemz ships as a Developer ID-signed, notarized `.dmg`. No Mac App Store, no
+sandboxing constraints, no installer to host beyond an HTTPS download.
+
+### One-time setup
+
+1. **Apple Developer Program** ($99/yr).
+2. From Xcode → Settings → Accounts, click *Manage Certificates* and create a
+   **Developer ID Application** certificate. Export it as a `.p12` if you want
+   to use it from CI.
+3. **App-specific password** for `notarytool`: visit
+   https://appleid.apple.com → Sign-In and Security → App-Specific Passwords.
+4. Install the helper tool used by the release script:
+
+   ```bash
+   brew install create-dmg ninja ccache
+   ```
+
+5. Copy the env template and fill it in:
+
+   ```bash
+   cp .env.release.example .env.release
+   # edit .env.release with your identity, Apple ID, team ID, app password
+   ```
+
+   `.env.release` is gitignored. Verify your signing identity is visible:
+
+   ```bash
+   security find-identity -v -p codesigning
+   ```
+
+### Cutting a release locally
+
+```bash
+scripts/release
+```
+
+That:
+
+1. Configures + builds a universal (arm64 + x86_64) Release.
+2. Codesigns every Mach-O inside the bundle with hardened runtime + your
+   entitlements (`Resources/EZStemz.entitlements`).
+3. Submits the zipped app to Apple's notary service and waits for the ticket.
+4. Staples the ticket so the app opens offline.
+5. Builds a styled DMG, then signs + notarizes + staples the DMG itself.
+
+Output lands in `dist/EZStemz-<version>.dmg`. That's the file you ship.
+
+For a quick local smoke-test that skips Apple's servers (the resulting DMG
+will *not* open on other machines):
+
+```bash
+SKIP_NOTARIZE=1 scripts/release
+```
+
+### Cutting a release via GitHub Actions
+
+Push a tag and the workflow at `.github/workflows/release.yml` does the
+above on a `macos-14` runner and attaches the DMG to a draft GitHub Release.
+
+```bash
+git tag v0.3.0
+git push origin v0.3.0
+```
+
+Required repository secrets:
+
+| Secret | What it is |
+|---|---|
+| `DEVELOPER_ID_APPLICATION`  | Full identity string, e.g. `Developer ID Application: Your Name (ABCDE12345)` |
+| `APPLE_ID`                  | Apple ID email |
+| `APPLE_TEAM_ID`             | 10-char team ID |
+| `APPLE_APP_PASSWORD`        | App-specific password from appleid.apple.com |
+| `MACOS_CERT_P12_BASE64`     | `base64 -i cert.p12` of the exported Developer ID Application certificate |
+| `MACOS_CERT_P12_PASSWORD`   | The password you set when exporting the .p12 |
+| `MACOS_KEYCHAIN_PASSWORD`   | Any random string; used only to lock the temp keychain on the runner |
+| `EZSTEMZ_MODEL_URL`         | Direct download URL for `ggml-model-htdemucs-6s-f16.bin` (e.g. a private S3 link or GitHub release asset) |
+
+### Versioning
+
+The version comes from `project(ezstemz VERSION x.y.z)` in `CMakeLists.txt`.
+Bump it before tagging.
+

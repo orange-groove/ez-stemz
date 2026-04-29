@@ -39,6 +39,32 @@ private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void scrollBarMoved (juce::ScrollBar*, double newRangeStart) override;
 
+    void togglePlayPause();
+
+    /** App-global spacebar play/pause shortcut.
+
+        Listens to focus changes on the JUCE Desktop and installs itself as a
+        juce::KeyListener on whatever component is currently focused. KeyListeners
+        run BEFORE the focused component's own keyPressed, which is why this
+        beats `juce::Button`'s default "space triggers click" behaviour. The
+        shortcut is suppressed while a TextEditor is focused so typing isn't
+        broken. */
+    class SpacebarShortcut  : public juce::FocusChangeListener,
+                              public juce::KeyListener
+    {
+    public:
+        explicit SpacebarShortcut (SongProcessorComponent& owner);
+        ~SpacebarShortcut() override;
+
+        void globalFocusChanged (juce::Component* focusedComponent) override;
+        bool keyPressed (const juce::KeyPress& key,
+                         juce::Component* originatingComponent) override;
+
+    private:
+        SongProcessorComponent& owner;
+        juce::Component::SafePointer<juce::Component> currentFocused;
+    };
+
     void refreshFromService();
     void loadStems();
     void rebuildTrackStrips();
@@ -86,6 +112,8 @@ private:
     double pixelsPerSecond = 0.0;
     double scrollSeconds   = 0.0;
     double trackLength     = 0.0;
+
+    SpacebarShortcut spacebarShortcut { *this };
 };
 
 } // namespace ezstemz

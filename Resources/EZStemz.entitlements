@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Minimal entitlements for hardened runtime.
+      EZStemz is distributed outside the Mac App Store with Developer ID +
+      notarization, so we do NOT enable the App Sandbox. Only enable extra
+      entitlements as the app actually grows new capabilities.
+    -->
+
+    <!-- Default Apple Silicon JIT-style allowances are not needed; demucs.cpp
+         and JUCE link statically and don't generate code at runtime. -->
+
+    <!-- Audio output device only; JUCE handles this via CoreAudio. We don't
+         need an entitlement for output. If we ever record from a microphone,
+         add com.apple.security.device.audio-input here AND an
+         NSMicrophoneUsageDescription in Info.plist. -->
+
+    <!-- Allow loading frameworks signed by other teams (e.g. Sparkle in the
+         future). Cheap to enable, doesn't weaken security materially. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

@@ -31,6 +31,54 @@ juce::StringArray sortedStemNames (const juce::StringArray& src)
 
 } // namespace
 
+SongProcessorComponent::SpacebarShortcut::SpacebarShortcut (SongProcessorComponent& o)
+    : owner (o)
+{
+    juce::Desktop::getInstance().addFocusChangeListener (this);
+
+    // Hook into whatever already had focus when this page was created
+    // (e.g. the desktop window itself).
+    if (auto* current = juce::Component::getCurrentlyFocusedComponent())
+        globalFocusChanged (current);
+}
+
+SongProcessorComponent::SpacebarShortcut::~SpacebarShortcut()
+{
+    juce::Desktop::getInstance().removeFocusChangeListener (this);
+    if (currentFocused != nullptr)
+        currentFocused->removeKeyListener (this);
+}
+
+void SongProcessorComponent::SpacebarShortcut::globalFocusChanged (juce::Component* c)
+{
+    if (currentFocused.getComponent() == c)
+        return;
+
+    if (currentFocused != nullptr)
+        currentFocused->removeKeyListener (this);
+
+    currentFocused = c;
+
+    if (c != nullptr)
+        c->addKeyListener (this);
+}
+
+bool SongProcessorComponent::SpacebarShortcut::keyPressed (const juce::KeyPress& key,
+                                                           juce::Component* origin)
+{
+    if (key != juce::KeyPress::spaceKey)
+        return false;
+
+    // Don't hijack space while the user is typing into a text editor
+    // (e.g. editing a slider's value text box).
+    for (auto* c = origin; c != nullptr; c = c->getParentComponent())
+        if (dynamic_cast<juce::TextEditor*> (c) != nullptr)
+            return false;
+
+    owner.togglePlayPause();
+    return true;
+}
+
 SongProcessorComponent::SongProcessorComponent (Project p)
     : project (std::move (p))
 {
@@ -186,6 +234,14 @@ void SongProcessorComponent::resized()
         zoomToFit();
     else
         applyZoomAndScroll();
+}
+
+void SongProcessorComponent::togglePlayPause()
+{
+    if (player.isPlaying())
+        player.pause();
+    else if (stemsLoaded)
+        player.play();
 }
 
 void SongProcessorComponent::paint (juce::Graphics& g)

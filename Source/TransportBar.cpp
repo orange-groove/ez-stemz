@@ -79,6 +79,20 @@ TransportBar::TransportBar (MultitrackPlayer& p) : player (p)
     rateSlider.updateText();
     addAndMakeVisible (rateSlider);
 
+    pitchLockButton.setClickingTogglesState (true);
+    pitchLockButton.setToggleState (player.getPreservePitch(), juce::dontSendNotification);
+    pitchLockButton.setTooltip ("When on, changing the rate keeps the pitch (time-stretch). "
+                                "When off, changing the rate also shifts pitch (vinyl mode).");
+    pitchLockButton.setColour (juce::TextButton::buttonOnColourId,  juce::Colour (0xFF6366F1));
+    pitchLockButton.setColour (juce::TextButton::buttonColourId,    juce::Colour (0xFF1F2937));
+    pitchLockButton.setColour (juce::TextButton::textColourOnId,    juce::Colours::white);
+    pitchLockButton.setColour (juce::TextButton::textColourOffId,   juce::Colour (0xFFCBD5E1));
+    pitchLockButton.onClick = [this]
+    {
+        player.setPreservePitch (pitchLockButton.getToggleState());
+    };
+    addAndMakeVisible (pitchLockButton);
+
     timeLabel.setText ("00:00.00 / 00:00.00", juce::dontSendNotification);
     timeLabel.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (timeLabel);
@@ -100,8 +114,9 @@ void TransportBar::resized()
     stopButton.setBounds (r.removeFromLeft (60));
     r.removeFromLeft (8);
 
-    // Right-hand cluster: time | master gain | rate (laid out right-to-left)
-    auto right = r.removeFromRight (520);
+    // Right-hand cluster: time | master | rate slider | rate label | pitch lock
+    // (laid out right-to-left)
+    auto right = r.removeFromRight (580);
 
     timeLabel.setBounds (right.removeFromRight (140));
     right.removeFromRight (8);
@@ -109,9 +124,11 @@ void TransportBar::resized()
     masterSlider.setBounds (right.removeFromRight (140));
     right.removeFromRight (8);
 
-    rateSlider.setBounds (right.removeFromRight (170));
+    rateSlider.setBounds (right.removeFromRight (160));
     right.removeFromRight (4);
     rateLabel.setBounds (right.removeFromRight (40));
+    right.removeFromRight (4);
+    pitchLockButton.setBounds (right.removeFromRight (60));
 
     r.removeFromRight (8);
     scrubSlider.setBounds (r);

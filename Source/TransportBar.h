@@ -34,12 +34,13 @@ private:
         double snapValue (double attemptedValue, DragMode dragMode) override;
     };
 
-    juce::TextButton playPauseButton { "Play" };
-    juce::TextButton stopButton      { "Stop" };
+    juce::TextButton playPauseButton  { "Play" };
+    juce::TextButton stopButton       { "Stop" };
     juce::Slider     scrubSlider;
     juce::Slider     masterSlider;
     SnappingSlider   rateSlider;
     juce::Label      rateLabel;
+    juce::TextButton pitchLockButton  { "Pitch" };
     juce::Label      timeLabel;
 
     bool userScrubbing = false;

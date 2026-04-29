@@ -1,5 +1,35 @@
 cmake_minimum_required(VERSION 3.22)
 
+# ---------------------------------------------------------------------------
+# macOS deployment + arch settings (must be set BEFORE project())
+# ---------------------------------------------------------------------------
+# CMake bakes these into the toolchain on first compiler detection, so they
+# apply to JUCE, demucs.cpp, and signalsmith-stretch as well as our target.
+if(APPLE)
+    # CMake auto-populates the cache with an empty string, so `set(... CACHE)`
+    # without FORCE is a no-op on a fresh configure. Use FORCE only when the
+    # current value is unset / empty so explicit -D overrides still win.
+    if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+        # 11.0 = Big Sur. First arm64 release, covers ~99% of in-use Macs.
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0"
+            CACHE STRING "macOS deployment target" FORCE)
+    endif()
+
+    # arm64-only by default. We'd love to ship a universal binary, but
+    # demucs.cpp/CMakeLists.txt hardcodes `-march=native` in its Release
+    # flags, which expands to `-mcpu=apple-m1` on Apple Silicon and is
+    # rejected when cross-compiling the x86_64 slice. To enable universal
+    # builds you must first patch demucs.cpp to drop -march=native, then
+    # pass -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" explicitly.
+    if(NOT CMAKE_OSX_ARCHITECTURES)
+        if("${CMAKE_BUILD_TYPE}" STREQUAL "Release" OR
+           "${CMAKE_BUILD_TYPE}" STREQUAL "RelWithDebInfo")
+            set(CMAKE_OSX_ARCHITECTURES "arm64"
+                CACHE STRING "macOS architectures" FORCE)
+        endif()
+    endif()
+endif()
+
 project(ezstemz VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -40,6 +70,18 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# signalsmith-stretch (pitch-preserving time stretching)
+# ---------------------------------------------------------------------------
+
+FetchContent_Declare(
+    signalsmith-stretch
+    GIT_REPOSITORY https://github.com/Signalsmith-Audio/signalsmith-stretch.git
+    GIT_TAG        main
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(signalsmith-stretch)
+
+# ---------------------------------------------------------------------------
 # demucs.cpp (local source separation)
 # ---------------------------------------------------------------------------
 
@@ -62,13 +104,34 @@ add_subdirectory(${EZSTEMZ_DEMUCS_DIR} demucs-cpp-build EXCLUDE_FROM_ALL)
 # Standalone GUI app
 # ---------------------------------------------------------------------------
 
+# Privacy-prompt strings + minimum system version. JUCE merges this into the
+# generated Info.plist for every generator (Xcode and Ninja/Makefiles).
+set(EZSTEMZ_PLIST_MERGE
+"<plist version=\"1.0\"><dict>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright (c) ezstemz</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>${CMAKE_OSX_DEPLOYMENT_TARGET}</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>EZStemz needs access to your Documents folder to read audio files and save separated stems.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>EZStemz needs access to your Downloads folder to read audio files you drop in from there.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>EZStemz needs access to your Desktop to read audio files you drop in from there.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>EZStemz needs access to removable volumes to read audio files stored there.</string>
+</dict></plist>")
+
 juce_add_gui_app(ezstemz
-    PRODUCT_NAME            "EZStemz"
-    COMPANY_NAME            "ezstemz"
-    BUNDLE_ID               "com.ezstemz.app"
-    ICON_BIG                ""
-    NEEDS_CURL              FALSE
-    NEEDS_WEB_BROWSER       FALSE
+    PRODUCT_NAME                 "EZStemz"
+    COMPANY_NAME                 "ezstemz"
+    COMPANY_COPYRIGHT            "Copyright (c) ezstemz"
+    BUNDLE_ID                    "com.ezstemz.app"
+    ICON_BIG                     ""
+    NEEDS_CURL                   FALSE
+    NEEDS_WEB_BROWSER            FALSE
+    DOCUMENT_EXTENSIONS          mp3 wav flac aif aiff m4a ogg
+    PLIST_TO_MERGE               "${EZSTEMZ_PLIST_MERGE}"
 )
 
 juce_generate_juce_header(ezstemz)
@@ -105,8 +168,19 @@ target_compile_definitions(ezstemz PRIVATE
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:ezstemz,JUCE_VERSION>"
 )
 
+# signalsmith-stretch is FFT-heavy and the upstream README explicitly warns
+# that Debug builds run up to 10x slower. Without optimisation, processing
+# 12 channels of phase-vocoder time-stretching at audio rate misses the
+# realtime deadline and produces audible flutter / dropouts. Force -O2 on
+# the file that pulls in the stretch headers, even in Debug builds, so
+# realtime audio always works.
+set_source_files_properties(Source/MultitrackPlayer.cpp PROPERTIES
+    COMPILE_OPTIONS "-O2"
+)
+
 target_link_libraries(ezstemz PRIVATE
     demucs.cpp.lib
+    signalsmith-stretch
     juce::juce_audio_basics
     juce::juce_audio_devices
     juce::juce_audio_formats

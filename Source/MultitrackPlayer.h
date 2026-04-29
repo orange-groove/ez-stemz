@@ -5,6 +5,10 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 
+namespace signalsmith { namespace stretch {
+    template <typename Sample, class RandomEngine> class SignalsmithStretch;
+}}
+
 namespace ezstemz
 {
 
@@ -73,11 +77,18 @@ public:
     void  setMasterGain  (float linearGain);
     float getMasterGain() const noexcept;
 
-    /** Playback rate as a multiplier (1.0 = normal speed). Implemented by
-        scaling each track's resampling ratio, so it changes both speed and
-        pitch (no time-stretching). Clamped to [0.25, 4.0]. */
+    /** Playback rate as a multiplier (1.0 = normal speed). When pitch
+        preservation is on (the default), a phase-vocoder-style time
+        stretcher is used; otherwise it falls back to vinyl-style
+        resampling that also shifts pitch. Clamped to [0.25, 4.0]. */
     void  setPlaybackRate (float rate);
     float getPlaybackRate() const noexcept;
+
+    /** Whether to keep the source pitch when the playback rate changes.
+        Default true. When false, changing the rate shifts the pitch
+        (vinyl mode) but uses zero added latency / CPU. */
+    void  setPreservePitch (bool shouldPreservePitch);
+    bool  getPreservePitch() const noexcept;
 
     // ---------- AudioSource ----------
     void prepareToPlay (int samplesPerBlockExpected, double sampleRate) override;
@@ -100,10 +111,15 @@ private:
         std::atomic<float> currentGainRamp { 1.0f };
     };
 
+    using Stretcher = signalsmith::stretch::SignalsmithStretch<float, void>;
+
     void timerCallback() override;
     bool anyTrackSoloed() const noexcept;
     void prepareTrackForPlayback (Track& t);
     void setTrackPositionInFileSamples (Track& t, juce::int64 fileSamples);
+    void applyRateSettingsToTrack (Track& t);
+    void recreateGlobalStretcher();
+    bool isStretcherActive() const noexcept;
 
     juce::AudioFormatManager formatManager;
     juce::OwnedArray<Track>  tracks;
@@ -119,9 +135,27 @@ private:
     std::atomic<float> masterGain { 1.0f };
     float              currentMasterGainRamp = 1.0f;
 
-    std::atomic<float> playbackRate { 1.0f };
+    std::atomic<float> playbackRate   { 1.0f };
+    std::atomic<bool>  preservePitch  { true };
 
     juce::AudioBuffer<float> trackBuffer;
+
+    // ---- shared time-stretcher ---------------------------------------------
+    //
+    // We feed every stem through a single SignalsmithStretch instance so that
+    // all the stems share the same FFT window timing. Running independent
+    // stretchers per-stem causes audible flutter / comb-filtering on mixdown,
+    // because each stem's phase-vocoder window phase drifts independently and
+    // the stems are heavily correlated (they came from the same source mix).
+    //
+    // The stretcher input is `numTracks * 2` channels (stereo per stem),
+    // packed into stretchInBuf and stretchOutBuf at fixed channel offsets.
+    std::unique_ptr<Stretcher> globalStretch;
+    juce::AudioBuffer<float>   stretchInBuf;
+    juce::AudioBuffer<float>   stretchOutBuf;
+    int                        stretchNumChannels = 0;
+    double                     stretchInputAccumulator = 0.0;
+    std::atomic<bool>          stretchPendingReset { false };
 
     juce::CriticalSection tracksLock;
 };

@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# Build a signed + notarized + stapled EZStemz.dmg for distribution.
+#
+# Required environment (set these in your shell or a sourced .env.release):
+#   DEVELOPER_ID_APPLICATION   "Developer ID Application: Your Name (TEAMID)"
+#                              The exact identity string from `security find-identity -v`.
+#   APPLE_ID                   The Apple ID email associated with your dev account.
+#   APPLE_TEAM_ID              Your 10-char team ID (visible in the dev portal).
+#   APPLE_APP_PASSWORD         An app-specific password for notarytool.
+#                              Generate at https://appleid.apple.com -> Sign-In and Security.
+#
+# Optional:
+#   EZSTEMZ_VERSION            Overrides the version embedded in the DMG name.
+#                              Defaults to the project() version from CMakeLists.txt.
+#   EZSTEMZ_MODEL_FILE         Path to the demucs .bin model to bundle.
+#                              Same flag the dev script understands.
+#   SKIP_NOTARIZE=1            Build + sign locally but skip notarytool. Useful
+#                              while iterating on the script. The resulting DMG
+#                              will NOT open cleanly on other machines.
+#
+# Usage:
+#   scripts/release                  # full pipeline
+#   SKIP_NOTARIZE=1 scripts/release  # local-only smoke test
+#
+# Output:
+#   build-release/ezstemz_artefacts/Release/EZStemz.app  (signed + stapled)
+#   dist/EZStemz-<version>.dmg                           (signed + stapled)
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+ROOT=$(pwd)
+
+BUILD_DIR=${BUILD_DIR:-build-release}
+DIST_DIR=${DIST_DIR:-dist}
+APP_NAME="EZStemz"
+APP_PATH="${BUILD_DIR}/ezstemz_artefacts/Release/${APP_NAME}.app"
+ENTITLEMENTS="${ROOT}/Resources/${APP_NAME}.entitlements"
+BUNDLE_ID="com.ezstemz.app"
+
+log()  { printf '\033[36m▶\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m!\033[0m %s\n' "$*"; }
+fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+
+# -------- 1. Sanity checks --------
+[[ "$(uname)" == "Darwin" ]] || fail "scripts/release only runs on macOS."
+
+if [[ -f .env.release ]]; then
+    log "Loading .env.release"
+    set -a; source .env.release; set +a
+fi
+
+if [[ -z "${SKIP_NOTARIZE:-}" ]]; then
+    : "${DEVELOPER_ID_APPLICATION:?Set DEVELOPER_ID_APPLICATION}"
+    : "${APPLE_ID:?Set APPLE_ID}"
+    : "${APPLE_TEAM_ID:?Set APPLE_TEAM_ID}"
+    : "${APPLE_APP_PASSWORD:?Set APPLE_APP_PASSWORD}"
+fi
+
+[[ -f "${ENTITLEMENTS}" ]] || fail "Missing entitlements file at ${ENTITLEMENTS}"
+
+if ! command -v create-dmg >/dev/null 2>&1; then
+    warn "create-dmg not found. Installing via Homebrew..."
+    brew install create-dmg
+fi
+
+# Resolve version from CMakeLists.txt unless overridden.
+VERSION="${EZSTEMZ_VERSION:-$(awk '/^project\(ezstemz VERSION/ {print $3}' CMakeLists.txt | tr -d ')')}"
+[[ -n "${VERSION}" ]] || fail "Could not resolve project version."
+log "Building ${APP_NAME} ${VERSION}"
+
+# -------- 2. Configure + build --------
+# arm64-only. demucs.cpp's hardcoded -march=native makes universal builds
+# painful (see CMakeLists.txt for the workaround). Override with
+# CMAKE_OSX_ARCHITECTURES env var if you've patched demucs.cpp.
+CMAKE_ARGS=(
+    -B "${BUILD_DIR}"
+    -G Ninja
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES:-arm64}"
+)
+if [[ -n "${EZSTEMZ_MODEL_FILE:-}" ]]; then
+    CMAKE_ARGS+=(-DEZSTEMZ_MODEL_FILE="${EZSTEMZ_MODEL_FILE}")
+fi
+
+log "Configuring (${BUILD_DIR})"
+cmake "${CMAKE_ARGS[@]}"
+
+log "Building Release (arch: ${CMAKE_OSX_ARCHITECTURES:-arm64})"
+cmake --build "${BUILD_DIR}" --target ezstemz
+
+[[ -d "${APP_PATH}" ]] || fail "Build did not produce ${APP_PATH}"
+
+# -------- 3. Codesign --------
+if [[ -n "${SKIP_NOTARIZE:-}" ]]; then
+    SIGN_ID="-"   # ad-hoc; lets us at least verify --deep + entitlements locally
+    log "SKIP_NOTARIZE=1 → ad-hoc signing only"
+else
+    SIGN_ID="${DEVELOPER_ID_APPLICATION}"
+    log "Codesigning with: ${SIGN_ID}"
+fi
+
+# Sign every nested binary first (frameworks, helpers), then the .app last.
+# --deep is deprecated by Apple, so we walk the bundle ourselves.
+sign_one() {
+    local target="$1"
+    codesign --force \
+        --options=runtime \
+        --timestamp \
+        --entitlements "${ENTITLEMENTS}" \
+        --sign "${SIGN_ID}" \
+        "${target}"
+}
+
+# Sign nested mach-o binaries inside Frameworks/, MacOS/, Helpers/, etc.
+log "Signing nested binaries"
+while IFS= read -r -d '' f; do
+    if file "$f" 2>/dev/null | grep -q 'Mach-O'; then
+        if [[ "$f" != "${APP_PATH}/Contents/MacOS/${APP_NAME}" ]]; then
+            sign_one "$f" || true
+        fi
+    fi
+done < <(find "${APP_PATH}" -type f -print0)
+
+log "Signing main bundle"
+sign_one "${APP_PATH}"
+
+log "Verifying signature"
+codesign --verify --verbose=2 --strict "${APP_PATH}"
+
+if [[ -z "${SKIP_NOTARIZE:-}" ]]; then
+    spctl --assess --type execute --verbose=2 "${APP_PATH}" || \
+        warn "spctl pre-notarize check failed (expected — Gatekeeper rejects until stapled)"
+fi
+
+# -------- 4. Notarize --------
+if [[ -z "${SKIP_NOTARIZE:-}" ]]; then
+    NOTARIZE_ZIP="${BUILD_DIR}/${APP_NAME}-notarize.zip"
+    log "Zipping for notarytool → ${NOTARIZE_ZIP}"
+    rm -f "${NOTARIZE_ZIP}"
+    /usr/bin/ditto -c -k --keepParent "${APP_PATH}" "${NOTARIZE_ZIP}"
+
+    log "Submitting to notary service (this can take 1–10 minutes)"
+    xcrun notarytool submit "${NOTARIZE_ZIP}" \
+        --apple-id "${APPLE_ID}" \
+        --team-id "${APPLE_TEAM_ID}" \
+        --password "${APPLE_APP_PASSWORD}" \
+        --wait
+
+    log "Stapling notarization ticket"
+    xcrun stapler staple "${APP_PATH}"
+    xcrun stapler validate "${APP_PATH}"
+    spctl --assess --type execute --verbose=2 "${APP_PATH}"
+fi
+
+# -------- 5. DMG --------
+mkdir -p "${DIST_DIR}"
+DMG_PATH="${DIST_DIR}/${APP_NAME}-${VERSION}.dmg"
+rm -f "${DMG_PATH}"
+
+log "Creating DMG → ${DMG_PATH}"
+# create-dmg builds a styled installer window with a /Applications symlink.
+create-dmg \
+    --volname "${APP_NAME} ${VERSION}" \
+    --window-pos 200 120 \
+    --window-size 640 380 \
+    --icon-size 96 \
+    --icon "${APP_NAME}.app" 160 180 \
+    --hide-extension "${APP_NAME}.app" \
+    --app-drop-link 480 180 \
+    --no-internet-enable \
+    "${DMG_PATH}" \
+    "${APP_PATH}"
+
+if [[ -z "${SKIP_NOTARIZE:-}" ]]; then
+    log "Signing DMG"
+    codesign --force --timestamp --sign "${SIGN_ID}" "${DMG_PATH}"
+
+    log "Notarizing DMG"
+    xcrun notarytool submit "${DMG_PATH}" \
+        --apple-id "${APPLE_ID}" \
+        --team-id "${APPLE_TEAM_ID}" \
+        --password "${APPLE_APP_PASSWORD}" \
+        --wait
+
+    log "Stapling DMG"
+    xcrun stapler staple "${DMG_PATH}"
+    xcrun stapler validate "${DMG_PATH}"
+fi
+
+log "Done."
+printf '\nArtifacts:\n  %s\n  %s\n' "${APP_PATH}" "${DMG_PATH}"

@@ -1,5 +1,6 @@
 build/
 build-*/
+dist/
 .cache/
 .DS_Store
 *.user
@@ -7,6 +8,7 @@ build-*/
 
 # Local config
 .env
+.env.release
 
 # IDE
 .vscode/
