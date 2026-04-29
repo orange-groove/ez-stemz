@@ -93,7 +93,7 @@ private:
     juce::AudioSourcePlayer  sourcePlayer;
     juce::AudioDeviceManager deviceManager;
 
-    juce::TextButton backButton    { "<- Back" };
+    juce::TextButton backButton    { "Back" };
     juce::TextButton zoomOutButton { "-" };
     juce::TextButton zoomInButton  { "+" };
     juce::TextButton zoomFitButton { "Fit" };

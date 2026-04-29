@@ -53,8 +53,12 @@ public:
 
     /** Width (in pixels) of the fixed control panel on the left side of
         each strip. Used by the parent to align the horizontal scrollbar
-        with the waveform region. */
-    static constexpr int kControlsLeftWidth = 4 + 110 + 36 + 36 + 180 + 12;
+        with the waveform region. Layout is two rows:
+          row 1 (top):    [stripe][name fills] [M] [S]
+          row 2 (bottom): [stripe][gain slider fills full width] */
+    static constexpr int kStripeW          = 5;
+    static constexpr int kBtnW             = 22;
+    static constexpr int kControlsLeftWidth = 160;
 
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;

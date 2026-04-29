@@ -214,7 +214,7 @@ void SongProcessorComponent::resized()
     // Reserve a row for the horizontal scrollbar, aligned with the
     // waveform region (skip past the controls panel on the left).
     auto scrollRow = stripsArea.removeFromBottom (16);
-    const int waveX = stripsArea.getX() + TrackStripComponent::kControlsLeftWidth - 4;
+    const int waveX = stripsArea.getX() + TrackStripComponent::kControlsLeftWidth;
     hScrollBar.setBounds (juce::Rectangle<int> (waveX,
                                                 scrollRow.getY(),
                                                 juce::jmax (0, stripsArea.getRight() - waveX),
@@ -224,7 +224,7 @@ void SongProcessorComponent::resized()
     for (auto* s : strips)
     {
         s->setBounds (stripsArea.getX(), y, stripsArea.getWidth(), 80);
-        y += 84;
+        y += 80;
     }
 
     // The constructor's loadStems() can run before we have a real size,
@@ -370,10 +370,9 @@ int SongProcessorComponent::getWaveformWidthPx() const
     if (strips.isEmpty())
         return 0;
 
-    const auto stripBounds = strips[0]->getLocalBounds().reduced (4);
     return juce::jmax (0,
-                       stripBounds.getWidth()
-                       - (110 + 36 + 36 + 180 + 8));
+                       strips[0]->getWidth()
+                       - TrackStripComponent::kControlsLeftWidth);
 }
 
 void SongProcessorComponent::setZoomControlsVisible (bool v)

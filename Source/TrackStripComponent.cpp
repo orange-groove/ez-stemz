@@ -29,25 +29,43 @@ TrackStripComponent::TrackStripComponent (MultitrackPlayer& p,
 {
     auto& info = player.getTrackInfo (trackIndex);
 
+    auto stemColour = colourForStem (info.name);
+
     nameLabel.setText (info.name, juce::dontSendNotification);
-    nameLabel.setColour (juce::Label::textColourId, colourForStem (info.name));
-    nameLabel.setFont (juce::Font (juce::FontOptions (16.0f).withStyle ("Bold")));
+    nameLabel.setColour (juce::Label::textColourId, juce::Colour (0xFFE5E7EB));
+    nameLabel.setFont (juce::Font (juce::FontOptions (12.5f).withStyle ("Bold")));
+    nameLabel.setMinimumHorizontalScale (1.0f);
+    nameLabel.setBorderSize ({ 0, 2, 0, 0 });
     addAndMakeVisible (nameLabel);
 
-    muteButton.setClickingTogglesState (true);
-    muteButton.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xFFEF4444));
+    auto styleSquareBtn = [] (juce::TextButton& b, juce::Colour onCol)
+    {
+        b.setClickingTogglesState (true);
+        b.setColour (juce::TextButton::buttonOnColourId, onCol);
+        b.setColour (juce::TextButton::buttonColourId, juce::Colour (0xFF111827));
+        b.setColour (juce::TextButton::textColourOnId,  juce::Colour (0xFF0B0F19));
+        b.setColour (juce::TextButton::textColourOffId, juce::Colour (0xFF94A3B8));
+    };
+
+    styleSquareBtn (muteButton, juce::Colour (0xFFEF4444));
+    muteButton.setTooltip ("Mute");
     muteButton.onClick = [this] { player.setTrackMuted (trackIndex, muteButton.getToggleState()); };
     addAndMakeVisible (muteButton);
 
-    soloButton.setClickingTogglesState (true);
-    soloButton.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xFFFACC15));
+    styleSquareBtn (soloButton, juce::Colour (0xFFFACC15));
+    soloButton.setTooltip ("Solo");
     soloButton.onClick = [this] { player.setTrackSoloed (trackIndex, soloButton.getToggleState()); };
     addAndMakeVisible (soloButton);
 
     gainSlider.setSliderStyle (juce::Slider::LinearHorizontal);
-    gainSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 50, 18);
+    gainSlider.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
+    gainSlider.setPopupDisplayEnabled (true, true, this);
     gainSlider.setRange (0.0, 1.5, 0.01);
     gainSlider.setValue (player.getTrackGain (trackIndex), juce::dontSendNotification);
+    gainSlider.setColour (juce::Slider::trackColourId,     stemColour.withAlpha (0.65f));
+    gainSlider.setColour (juce::Slider::backgroundColourId, juce::Colour (0xFF111827));
+    gainSlider.setColour (juce::Slider::thumbColourId,     juce::Colour (0xFFE5E7EB));
+    gainSlider.setTooltip ("Gain");
     gainSlider.onValueChange = [this] { player.setTrackGain (trackIndex, (float) gainSlider.getValue()); };
     addAndMakeVisible (gainSlider);
 
@@ -71,26 +89,34 @@ void TrackStripComponent::changeListenerCallback (juce::ChangeBroadcaster* src)
 
 void TrackStripComponent::resized()
 {
-    auto r = getLocalBounds().reduced (4);
-    nameLabel.setBounds (r.removeFromLeft (110));
+    auto controls = getLocalBounds().withWidth (kControlsLeftWidth);
+    controls.removeFromLeft (kStripeW);
+    controls.reduce (4, 6);
 
-    auto squareIn = [] (juce::Rectangle<int> col, int size)
+    auto row1 = controls.removeFromTop (22);
+
+    auto centredSquare = [] (juce::Rectangle<int> col, int size)
     {
         return juce::Rectangle<int> (0, 0, size, size).withCentre (col.getCentre());
     };
 
-    constexpr int kBtnSize = 30; // 6px of breathing room inside the 36px column
-    muteButton.setBounds (squareIn (r.removeFromLeft (36), kBtnSize));
-    soloButton.setBounds (squareIn (r.removeFromLeft (36), kBtnSize));
-    gainSlider.setBounds (r.removeFromLeft (180));
-    // Remaining space is the waveform.
+    soloButton.setBounds (centredSquare (row1.removeFromRight (kBtnW), kBtnW));
+    row1.removeFromRight (2);
+    muteButton.setBounds (centredSquare (row1.removeFromRight (kBtnW), kBtnW));
+    row1.removeFromRight (4);
+    nameLabel.setBounds (row1);
+
+    controls.removeFromTop (6);
+
+    auto gainRow = controls.removeFromTop (20);
+    gainSlider.setBounds (gainRow);
 }
 
 juce::Rectangle<int> TrackStripComponent::getWaveformBounds() const
 {
-    auto waveform = getLocalBounds().reduced (4);
-    waveform.removeFromLeft (110 + 36 + 36 + 180 + 8);
-    return waveform;
+    auto waveform = getLocalBounds();
+    waveform.removeFromLeft (kControlsLeftWidth);
+    return waveform.reduced (0, 4);
 }
 
 int TrackStripComponent::getWaveformLeftX() const noexcept
@@ -100,10 +126,20 @@ int TrackStripComponent::getWaveformLeftX() const noexcept
 
 void TrackStripComponent::paint (juce::Graphics& g)
 {
-    auto bg = juce::Colour (0xFF1F2937);
-    g.fillAll (bg);
+    g.fillAll (juce::Colour (0xFF111827));
 
-    g.setColour (juce::Colour (0xFF111827));
+    auto controls = getLocalBounds().withWidth (kControlsLeftWidth);
+    g.setColour (juce::Colour (0xFF1F2937));
+    g.fillRect (controls);
+
+    auto stripe = controls.withWidth (kStripeW);
+    g.setColour (colourForStem (player.getTrackInfo (trackIndex).name));
+    g.fillRect (stripe);
+
+    g.setColour (juce::Colour (0xFF0B0F19));
+    g.fillRect (juce::Rectangle<int> (kControlsLeftWidth, 0, 1, getHeight()));
+
+    g.setColour (juce::Colour (0xFF374151));
     g.fillRect (getLocalBounds().removeFromBottom (1));
 
     auto waveform = getWaveformBounds();
@@ -144,8 +180,8 @@ void TrackStripComponent::paint (juce::Graphics& g)
         const int x = waveform.getX()
                     + (int) std::round ((playhead - startSec) * pps);
         g.setColour (juce::Colour (0xFFFFFFFF));
-        g.drawLine ((float) x, (float) waveform.getY(),
-                    (float) x, (float) waveform.getBottom(), 1.5f);
+        g.drawLine ((float) x, 0.0f,
+                    (float) x, (float) getHeight(), 1.5f);
     }
 }
 
