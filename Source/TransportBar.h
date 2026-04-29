@@ -34,8 +34,27 @@ private:
         double snapValue (double attemptedValue, DragMode dragMode) override;
     };
 
-    juce::TextButton playPauseButton  { "Play" };
-    juce::TextButton stopButton       { "Stop" };
+    /** Tiny vector-icon button used for transport (play / pause / stop). */
+    class IconButton  : public juce::Button
+    {
+    public:
+        enum class Shape { Play, Pause, Stop };
+
+        explicit IconButton (Shape s) : juce::Button ({}), shape (s) {}
+
+        void setShape (Shape s) { shape = s; repaint(); }
+        Shape getShape() const noexcept { return shape; }
+
+    private:
+        void paintButton (juce::Graphics&,
+                          bool shouldDrawButtonAsHighlighted,
+                          bool shouldDrawButtonAsDown) override;
+
+        Shape shape;
+    };
+
+    IconButton playPauseButton { IconButton::Shape::Play };
+    IconButton stopButton      { IconButton::Shape::Stop };
     juce::Slider     scrubSlider;
     juce::Slider     masterSlider;
     SnappingSlider   rateSlider;
