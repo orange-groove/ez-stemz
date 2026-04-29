@@ -141,3 +141,135 @@ jobs:
           draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  windows-release:
+    name: Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    env:
+      DEMUCS_DIR:    ${{ github.workspace }}\demucs.cpp
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+
+    steps:
+      - name: Check out ezstemz
+        uses: actions/checkout@v4
+        with:
+          path: ezstemz
+
+      - name: Check out demucs.cpp (with submodules)
+        uses: actions/checkout@v4
+        with:
+          repository: sevagh/demucs.cpp
+          submodules: recursive
+          path: demucs.cpp
+
+      - name: Set up MSVC + clang-cl
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Ninja + NSIS
+        run: |
+          choco install ninja nsis -y --no-progress
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\vcpkg\installed
+            C:\vcpkg\downloads
+          key: vcpkg-${{ runner.os }}-openblas-static-v1
+
+      - name: Install OpenBLAS via vcpkg
+        shell: pwsh
+        run: |
+          # vcpkg is preinstalled at C:\vcpkg on windows-latest runners.
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openblas:x64-windows-static
+
+      - name: Download demucs model
+        shell: pwsh
+        env:
+          MODEL_URL: ${{ secrets.EZSTEMZ_MODEL_URL }}
+        run: |
+          if (-not $env:MODEL_URL) {
+            Write-Error "Set the EZSTEMZ_MODEL_URL secret to a direct download for ggml-model-htdemucs-6s-f16.bin"
+            exit 1
+          }
+          New-Item -ItemType Directory -Force -Path models | Out-Null
+          Invoke-WebRequest -Uri $env:MODEL_URL `
+                            -OutFile models\ggml-model-htdemucs-6s-f16.bin `
+                            -MaximumRetryCount 3
+          Get-ChildItem models
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like "refs/tags/*") {
+            $v = $env:GITHUB_REF.Substring("refs/tags/v".Length)
+          } else {
+            $v = "${{ github.event.inputs.version }}".TrimStart("v")
+            if (-not $v) { $v = "0.0.0-dev" }
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Version: $v"
+
+      - name: Configure
+        working-directory: ezstemz
+        shell: pwsh
+        env:
+          MODEL_FILE: ${{ github.workspace }}\models\ggml-model-htdemucs-6s-f16.bin
+        run: |
+          $toolchain = "$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake"
+          cmake -B build-release -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=clang-cl `
+            -DCMAKE_CXX_COMPILER=clang-cl `
+            -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DEZSTEMZ_DEMUCS_DIR="$env:DEMUCS_DIR" `
+            -DEZSTEMZ_MODEL_FILE="$env:MODEL_FILE"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build
+        working-directory: ezstemz
+        shell: pwsh
+        run: |
+          cmake --build build-release --target ezstemz
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem build-release\ezstemz_artefacts\Release
+
+      - name: Build NSIS installer
+        working-directory: ezstemz
+        shell: pwsh
+        env:
+          EZSTEMZ_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $buildDir = "$PWD\build-release\ezstemz_artefacts\Release"
+          $output   = "$PWD\dist\EZStemz-$env:EZSTEMZ_VERSION-Setup.exe"
+          & makensis `
+            "/DEZSTEMZ_VERSION=$env:EZSTEMZ_VERSION" `
+            "/DEZSTEMZ_BUILD_DIR=$buildDir" `
+            "/DEZSTEMZ_OUTPUT=$output" `
+            windows\installer.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem dist
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EZStemz-${{ steps.version.outputs.version }}-windows
+          path: ezstemz/dist/*.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ezstemz/dist/*.exe
+          generate_release_notes: true
+          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

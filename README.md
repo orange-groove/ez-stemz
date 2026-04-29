@@ -105,11 +105,35 @@ cmake --build build --target ezstemz -j
 
 ### Windows
 
+EZStemz uses [clang-cl](https://clang.llvm.org/docs/UsersManual.html#clang-cl)
+on Windows because demucs.cpp's CMake script uses gcc-style compiler flags
+(`-Ofast -march=native ...`) that MSVC's `cl.exe` rejects. clang-cl ships
+with Visual Studio (Individual Components → "C++ Clang tools for Windows").
+
+You also need OpenBLAS. The path of least resistance is
+[vcpkg](https://vcpkg.io):
+
 ```powershell
+# One-time:
+git clone https://github.com/microsoft/vcpkg C:\vcpkg
+C:\vcpkg\bootstrap-vcpkg.bat
+C:\vcpkg\vcpkg install openblas:x64-windows-static
+
+# Per-build (from a "x64 Native Tools Command Prompt for VS 2022"):
 cd ezstemz
-cmake -S . -B build -G "Visual Studio 17 2022"
-cmake --build build --target ezstemz --config Release
+cmake -S . -B build -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DCMAKE_C_COMPILER=clang-cl `
+  -DCMAKE_CXX_COMPILER=clang-cl `
+  -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+  -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+  -DEZSTEMZ_DEMUCS_DIR=C:/path/to/demucs.cpp `
+  -DEZSTEMZ_MODEL_FILE=C:/path/to/ggml-model-htdemucs-6s-f16.bin
+cmake --build build --target ezstemz
 ```
+
+The MSVC runtime is statically linked, so distributed binaries don't need
+the Visual C++ Redistributable.
 
 ### Pointing at a different demucs.cpp / JUCE checkout
 
@@ -233,4 +257,37 @@ Required repository secrets:
 
 The version comes from `project(ezstemz VERSION x.y.z)` in `CMakeLists.txt`.
 Bump it before tagging.
+
+## Distribution (Windows)
+
+EZStemz on Windows ships as an **NSIS installer** (`EZStemz-<version>-Setup.exe`).
+Unlike macOS, Windows does not require notarization. Code signing is optional:
+
+- **Unsigned**: works, but Microsoft SmartScreen displays a "Windows protected
+  your PC" dialog the first time the user runs the installer. They can click
+  *More info → Run anyway* to proceed. Many free Windows tools ship like this.
+- **Signed with a regular code-signing cert** (~$200/yr from Sectigo, DigiCert,
+  Comodo): publisher name appears in the SmartScreen dialog instead of
+  "Unknown publisher". The dialog still appears until the cert builds reputation.
+- **Signed with an EV (Extended Validation) cert** (~$300/yr): SmartScreen
+  prompt is suppressed immediately. Required if you want zero friction.
+
+### Cutting a Windows release via GitHub Actions
+
+The same `release.yml` workflow that builds the macOS DMG also builds the
+Windows installer in parallel on a `windows-latest` runner. The job:
+
+1. Sets up MSVC + clang-cl via the `ilammy/msvc-dev-cmd` action.
+2. Installs Ninja and NSIS via Chocolatey.
+3. Restores `C:\vcpkg\installed` from cache and installs `openblas:x64-windows-static`.
+4. Downloads the demucs model from the `EZSTEMZ_MODEL_URL` secret.
+5. Configures with clang-cl + the vcpkg toolchain.
+6. Builds Release.
+7. Runs `makensis windows/installer.nsi` to produce the installer.
+8. Attaches the installer to the same draft GitHub Release as the DMG.
+
+No additional secrets are required beyond `EZSTEMZ_MODEL_URL` (already used by
+the macOS job). To add code signing later, set `WINDOWS_CERT_PFX_BASE64` and
+`WINDOWS_CERT_PASSWORD` secrets and call `signtool` after the
+"Build NSIS installer" step (against both `EZStemz.exe` and the installer).
 

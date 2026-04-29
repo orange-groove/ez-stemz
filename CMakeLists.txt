@@ -30,6 +30,14 @@ if(APPLE)
     endif()
 endif()
 
+# Statically link the MSVC runtime so end users don't need the Visual C++
+# redistributable. Has to be set before project() so it propagates to all
+# subprojects (JUCE, demucs.cpp, signalsmith-stretch).
+if(WIN32)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+        CACHE STRING "MSVC runtime library" FORCE)
+endif()
+
 project(ezstemz VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -171,12 +179,16 @@ target_compile_definitions(ezstemz PRIVATE
 # signalsmith-stretch is FFT-heavy and the upstream README explicitly warns
 # that Debug builds run up to 10x slower. Without optimisation, processing
 # 12 channels of phase-vocoder time-stretching at audio rate misses the
-# realtime deadline and produces audible flutter / dropouts. Force -O2 on
-# the file that pulls in the stretch headers, even in Debug builds, so
-# realtime audio always works.
-set_source_files_properties(Source/MultitrackPlayer.cpp PROPERTIES
-    COMPILE_OPTIONS "-O2"
-)
+# realtime deadline and produces audible flutter / dropouts. Force /O2 (cl)
+# or -O2 (gcc/clang/clang-cl) on the file that pulls in the stretch headers,
+# even in Debug builds, so realtime audio always works.
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set_source_files_properties(Source/MultitrackPlayer.cpp PROPERTIES
+        COMPILE_OPTIONS "/O2")
+else()
+    set_source_files_properties(Source/MultitrackPlayer.cpp PROPERTIES
+        COMPILE_OPTIONS "-O2")
+endif()
 
 target_link_libraries(ezstemz PRIVATE
     demucs.cpp.lib
