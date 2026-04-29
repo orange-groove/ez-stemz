@@ -258,8 +258,19 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $buildDir = "$PWD\build-release\ezstemz_artefacts\Release"
           $output   = "$PWD\dist\EZStemz-$env:EZSTEMZ_VERSION-Setup.exe"
+
+          # NSIS VIProductVersion needs strict 4-part numeric like 1.2.3.4.
+          # Strip any trailing non-numeric suffix from version (e.g. "-test"),
+          # then pad to 4 components.
+          $numeric = ($env:EZSTEMZ_VERSION -split '-')[0]
+          $parts = $numeric -split '\.'
+          while ($parts.Count -lt 4) { $parts += '0' }
+          $numeric = ($parts[0..3] -join '.')
+          Write-Host "Using VIProductVersion: $numeric"
+
           & makensis `
             "/DEZSTEMZ_VERSION=$env:EZSTEMZ_VERSION" `
+            "/DEZSTEMZ_VERSION_NUMERIC=$numeric" `
             "/DEZSTEMZ_BUILD_DIR=$buildDir" `
             "/DEZSTEMZ_OUTPUT=$output" `
             windows\installer.nsi

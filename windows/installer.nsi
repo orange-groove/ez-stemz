@@ -12,6 +12,14 @@
     !define EZSTEMZ_VERSION "0.0.0-dev"
 !endif
 
+; NSIS requires a strict 4-component numeric version for VIProductVersion.
+; Caller can pass /DEZSTEMZ_VERSION_NUMERIC=1.2.3.4; otherwise we fall back
+; to 0.0.0.0 so the build still succeeds for tagged versions like
+; "0.0.0-test".
+!ifndef EZSTEMZ_VERSION_NUMERIC
+    !define EZSTEMZ_VERSION_NUMERIC "0.0.0.0"
+!endif
+
 !ifndef EZSTEMZ_BUILD_DIR
     !error "Pass /DEZSTEMZ_BUILD_DIR=... pointing at the directory containing EZStemz.exe"
 !endif
@@ -30,7 +38,7 @@ InstallDir  "$PROGRAMFILES64\EZStemz"
 InstallDirRegKey HKLM "Software\EZStemz" "InstallDir"
 RequestExecutionLevel admin
 
-VIProductVersion                "${EZSTEMZ_VERSION}.0"
+VIProductVersion                "${EZSTEMZ_VERSION_NUMERIC}"
 VIAddVersionKey ProductName     "EZStemz"
 VIAddVersionKey CompanyName     "ezstemz"
 VIAddVersionKey LegalCopyright  "Copyright (c) ezstemz"
