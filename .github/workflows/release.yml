@@ -170,8 +170,17 @@ jobs:
           arch: x64
 
       - name: Install Ninja + NSIS
+        shell: pwsh
         run: |
           choco install ninja nsis -y --no-progress
+          # choco doesn't refresh PATH in the current shell - add NSIS to
+          # GITHUB_PATH so later steps can call `makensis` directly.
+          $nsisDir = "C:\Program Files (x86)\NSIS"
+          if (-not (Test-Path "$nsisDir\makensis.exe")) {
+              $nsisDir = "C:\Program Files\NSIS"
+          }
+          Write-Host "Adding NSIS dir to PATH: $nsisDir"
+          $nsisDir | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Cache vcpkg
         uses: actions/cache@v4
