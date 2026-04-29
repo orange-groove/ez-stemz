@@ -39,9 +39,12 @@ private:
     juce::Slider     scrubSlider;
     juce::Slider     masterSlider;
     SnappingSlider   rateSlider;
-    juce::Label      rateLabel;
     juce::TextButton pitchLockButton  { "Pitch" };
     juce::Label      timeLabel;
+
+    juce::Label rateHeader;
+    juce::Label masterHeader;
+    juce::Label timeHeader;
 
     bool userScrubbing = false;
 };

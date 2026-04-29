@@ -56,11 +56,20 @@ TransportBar::TransportBar (MultitrackPlayer& p) : player (p)
     masterSlider.onValueChange = [this] { player.setMasterGain ((float) masterSlider.getValue()); };
     addAndMakeVisible (masterSlider);
 
-    rateLabel.setText ("Rate", juce::dontSendNotification);
-    rateLabel.setJustificationType (juce::Justification::centredRight);
-    rateLabel.setFont (juce::Font (juce::FontOptions (12.0f)));
-    rateLabel.setColour (juce::Label::textColourId, juce::Colour (0xFFCBD5E1));
-    addAndMakeVisible (rateLabel);
+    auto styleHeaderLabel = [] (juce::Label& l, const juce::String& text)
+    {
+        l.setText (text, juce::dontSendNotification);
+        l.setJustificationType (juce::Justification::centredLeft);
+        l.setFont (juce::Font (juce::FontOptions (10.5f).withStyle ("Bold")));
+        l.setColour (juce::Label::textColourId, juce::Colour (0xFF94A3B8));
+        l.setBorderSize ({ 0, 0, 0, 0 });
+    };
+    styleHeaderLabel (rateHeader,   "RATE");
+    styleHeaderLabel (masterHeader, "MASTER VOLUME");
+    styleHeaderLabel (timeHeader,   "TIME");
+    addAndMakeVisible (rateHeader);
+    addAndMakeVisible (masterHeader);
+    addAndMakeVisible (timeHeader);
 
     rateSlider.setSliderStyle (juce::Slider::LinearHorizontal);
     rateSlider.setRange (0.5, 1.5, 0.01);
@@ -109,26 +118,38 @@ double TransportBar::SnappingSlider::snapValue (double attemptedValue, DragMode 
 void TransportBar::resized()
 {
     auto r = getLocalBounds().reduced (8, 6);
-    playPauseButton.setBounds (r.removeFromLeft (80));
+    playPauseButton.setBounds (r.removeFromLeft (80).withSizeKeepingCentre (80, 28));
     r.removeFromLeft (4);
-    stopButton.setBounds (r.removeFromLeft (60));
+    stopButton.setBounds (r.removeFromLeft (60).withSizeKeepingCentre (60, 28));
     r.removeFromLeft (8);
 
-    // Right-hand cluster: time | master | rate slider | rate label | pitch lock
-    // (laid out right-to-left)
-    auto right = r.removeFromRight (580);
+    // Right-hand cluster: each labelled column stacks a small header label
+    // on top of the actual control. Pitch lock has no header.
+    auto right = r.removeFromRight (620);
 
-    timeLabel.setBounds (right.removeFromRight (140));
-    right.removeFromRight (8);
+    auto withLabel = [] (juce::Rectangle<int> col,
+                          juce::Label& header,
+                          juce::Component& body)
+    {
+        header.setBounds (col.removeFromTop (12));
+        col.removeFromTop (1);
+        body.setBounds (col);
+    };
 
-    masterSlider.setBounds (right.removeFromRight (140));
-    right.removeFromRight (8);
+    auto timeCol = right.removeFromRight (160);
+    withLabel (timeCol, timeHeader, timeLabel);
+    right.removeFromRight (10);
 
-    rateSlider.setBounds (right.removeFromRight (160));
-    right.removeFromRight (4);
-    rateLabel.setBounds (right.removeFromRight (40));
-    right.removeFromRight (4);
-    pitchLockButton.setBounds (right.removeFromRight (60));
+    auto masterCol = right.removeFromRight (160);
+    withLabel (masterCol, masterHeader, masterSlider);
+    right.removeFromRight (10);
+
+    auto rateCol = right.removeFromRight (180);
+    withLabel (rateCol, rateHeader, rateSlider);
+    right.removeFromRight (6);
+
+    pitchLockButton.setBounds (right.removeFromRight (60)
+                                    .withSizeKeepingCentre (60, 26));
 
     r.removeFromRight (8);
     scrubSlider.setBounds (r);
